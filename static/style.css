@@ -1,0 +1,105 @@
+:root {
+  --bg: #0f141a;
+  --card: #171f27;
+  --text: #e6edf3;
+  --muted: #9fb0c0;
+  --accent: #00b894;
+  --danger: #ff6b6b;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 14px 18px;
+  border-bottom: 1px solid #22303d;
+}
+.brand { font-weight: 800; font-size: 18px; }
+.sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+main {
+  display: grid;
+  grid-template-columns: 1.3fr 0.7fr;
+  gap: 14px;
+  padding: 14px;
+  height: calc(100vh - 70px);
+}
+
+.left { display: flex; flex-direction: column; gap: 8px; }
+#map {
+  flex: 1;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid #22303d;
+}
+.hint {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 8px 10px;
+}
+
+.right { overflow: auto; padding-right: 6px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid #22303d;
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.card h2 { margin: 0 0 10px 0; font-size: 16px; }
+label { display: block; margin-top: 10px; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
+
+.row { display: flex; gap: 8px; align-items: center; }
+.sep { color: var(--muted); font-size: 12px; }
+
+input, select {
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid #2a3a48;
+  background: #0c1218;
+  color: var(--text);
+}
+
+button {
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #062a22;
+  font-weight: 800;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.05); }
+
+.status { margin-top: 10px; color: var(--muted); font-size: 13px; }
+
+.kpi { display: grid; gap: 6px; color: var(--text); font-size: 14px; }
+.advisory { margin-top: 10px; padding: 10px; border-radius: 10px; background: #0c1218; border: 1px solid #2a3a48; }
+
+.quicklooks { margin-top: 10px; }
+.ql-title { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+#qlImage {
+  margin-top: 10px;
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid #22303d;
+  background: #0c1218;
+}
+
+.small { color: var(--muted); font-size: 12px; }
+.pixelbox { margin-top: 10px; display: grid; gap: 6px; font-size: 13px; }
+.explain { margin-top: 10px; padding: 10px; border-radius: 10px; background: #0c1218; border: 1px solid #2a3a48; font-size: 13px; }
+.explain b { color: #cde7ff; }
+
+ul { padding-left: 18px; }
+a { color: #7bdcb5; }

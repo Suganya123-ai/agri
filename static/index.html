@@ -1,0 +1,118 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Agri-AI Web</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet Draw -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+
+<body>
+  <header>
+    <div class="brand">Agri-AI Web</div>
+    <div class="sub">Draw a field • Analyze • Inspect pixels • Get forecast & advice</div>
+  </header>
+
+  <main>
+    <section class="left">
+      <div id="map"></div>
+      <div class="hint">
+        Use the rectangle tool on the map (top-left) to select the area.
+      </div>
+    </section>
+
+    <section class="right">
+      <div class="card">
+        <h2>Parameters</h2>
+
+        <label>Date range</label>
+        <div class="row">
+          <input id="startDate" type="date"/>
+          <span class="sep">to</span>
+          <input id="endDate" type="date"/>
+        </div>
+
+        <label>Max cloud cover (%)</label>
+        <input id="maxCloud" type="number" min="0" max="100" value="20"/>
+
+        <button id="analyzeBtn">Start Analysis</button>
+        <div id="status" class="status">Status: Ready</div>
+      </div>
+
+      <div class="card">
+        <h2>Results</h2>
+
+        <div class="kpi">
+          <div><b>Current Stress</b>: <span id="currStress">--</span></div>
+          <div><b>7-Day</b>: <span id="y7">--</span></div>
+          <div><b>14-Day</b>: <span id="y14">--</span></div>
+        </div>
+
+        <div class="advisory" id="advisory">Advisory: --</div>
+
+        <div class="quicklooks">
+          <div class="ql-title">Quicklooks</div>
+          <select id="layerSelect">
+            <option value="True_Color">True Color</option>
+            <option value="Stress_Score">Stress Score</option>
+            <option value="NDVI">NDVI</option>
+            <option value="NDMI">NDMI</option>
+            <option value="NDRE">NDRE</option>
+            <option value="NDWI">NDWI</option>
+            <option value="Classification">Classification</option>
+          </select>
+          <img id="qlImage" alt="Quicklook preview" />
+        </div>
+      </div>
+
+      <!-- ✅ NEW: CULTIVATION CARD -->
+      <div class="card">
+        <h2>Cultivation Timing</h2>
+
+        <div class="kpi">
+          <div><b>Best week</b>: <span id="bestWeek">--</span></div>
+          <div><b>Confidence</b>: <span id="cultConf">--</span></div>
+        </div>
+
+        <div class="advisory" id="cultReason">Reason: --</div>
+      </div>
+
+      <div class="card">
+        <h2>Pixel Inspector</h2>
+        <div class="small">Click on the quicklook image to inspect a pixel.</div>
+        <div class="pixelbox">
+          <div><b>Pixel</b>: <span id="pixXY">--</span></div>
+          <div><b>Class</b>: <span id="pixClass">--</span></div>
+          <div><b>NDVI</b>: <span id="pixNDVI">--</span></div>
+          <div><b>NDMI</b>: <span id="pixNDMI">--</span></div>
+          <div><b>NDRE</b>: <span id="pixNDRE">--</span></div>
+          <div><b>Stress</b>: <span id="pixStress">--</span></div>
+        </div>
+
+        <div class="explain">
+          <div><b>Status</b>: <span id="expStatus">--</span></div>
+          <div><b>Why</b>: <span id="expWhy">--</span></div>
+          <div><b>Solution</b>: <span id="expSol">--</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Model Sharing</h2>
+        <button id="loadModelsBtn">Show models</button>
+        <ul id="modelsList"></ul>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
