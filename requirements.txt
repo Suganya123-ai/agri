@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+numpy
+pandas
+rasterio
+pystac-client
+planetary-computer
+lightgbm
+joblib
+scikit-learn
+matplotlib
+aiofiles
+python-multipart
