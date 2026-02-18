@@ -71,6 +71,11 @@ class AnalyzeResponse(BaseModel):
     forecast: Optional[Dict[str, float]] = None
     advisory: Optional[str] = None
 
+    # ✅ NEW: cultivation timing fields (these feed your UI)
+    best_cultivation_week: Optional[str] = None
+    cultivation_confidence: Optional[str] = None
+    cultivation_reason: Optional[str] = None
+
 
 class PixelInfoRequest(BaseModel):
     request_id: str
@@ -120,13 +125,8 @@ def _class_name(c: int) -> str:
 
 
 def _explain_pixel(v_cls: int, ndvi, ndmi, ndre, stress) -> PixelExplain:
-    """
-    Simple, human-friendly explanations:
-    - uses stress score (0..1), plus NDMI (moisture proxy) and NDRE (chlorophyll proxy)
-    """
     cname = _class_name(v_cls)
 
-    # Non vegetation
     if v_cls != 3:
         if v_cls == 1:
             return PixelExplain(
@@ -152,7 +152,6 @@ def _explain_pixel(v_cls: int, ndvi, ndmi, ndre, stress) -> PixelExplain:
             solution="Try selecting a different area or zoom in for a better field selection."
         )
 
-    # Vegetation pixel, but missing stress
     if not _isfinite(stress):
         return PixelExplain(
             status="Vegetation, but missing stress",
@@ -161,8 +160,6 @@ def _explain_pixel(v_cls: int, ndvi, ndmi, ndre, stress) -> PixelExplain:
         )
 
     s = float(stress)
-
-    # Diagnose drivers (very simple)
     moisture_low = _isfinite(ndmi) and float(ndmi) < 0.05
     chlor_low = _isfinite(ndre) and float(ndre) < 0.20
 
@@ -179,7 +176,7 @@ def _explain_pixel(v_cls: int, ndvi, ndmi, ndre, stress) -> PixelExplain:
     if s < 0.30:
         return PixelExplain(
             status="Healthy ✅",
-            why=f"Stress is low. Indicators suggest good conditions. Main drivers checked: {drivers_text}.",
+            why=f"Stress is low. Conditions look good. Main indicators: {drivers_text}.",
             solution="Keep current irrigation schedule and continue monitoring."
         )
     elif s < 0.60:
@@ -192,7 +189,7 @@ def _explain_pixel(v_cls: int, ndvi, ndmi, ndre, stress) -> PixelExplain:
         return PixelExplain(
             status="High stress 🛑",
             why=f"Stress is high. Likely reasons: {drivers_text}.",
-            solution="Prioritize irrigation, inspect for disease/pest damage, and consider protective measures (mulch/shade if applicable)."
+            solution="Prioritize irrigation, inspect for disease/pests, and consider protective measures."
         )
 
 
@@ -211,10 +208,10 @@ def _save_png(path_png: str, arr: np.ndarray, mode: str):
     elif mode == "class":
         h, w = arr.shape
         rgba = np.zeros((h, w, 4), dtype=np.float32)
-        rgba[arr == 1] = [0.2, 0.6, 1.0, 1.0]    # Water
-        rgba[arr == 2] = [0.6, 0.5, 0.4, 1.0]    # Soil
-        rgba[arr == 3] = [0.2, 0.8, 0.3, 1.0]    # Veg
-        rgba[arr == 4] = [0.95, 0.95, 0.95, 1.0] # Cloud/Shadow
+        rgba[arr == 1] = [0.2, 0.6, 1.0, 1.0]     # Water
+        rgba[arr == 2] = [0.6, 0.5, 0.4, 1.0]     # Soil
+        rgba[arr == 3] = [0.2, 0.8, 0.3, 1.0]     # Veg
+        rgba[arr == 4] = [0.95, 0.95, 0.95, 1.0]  # Cloud/Shadow
         plt.imshow(rgba)
     else:
         a = np.array(arr, dtype=np.float32)
@@ -265,6 +262,61 @@ def _make_quicklooks(request_id: str, datasets: Dict[str, Any]) -> Dict[str, str
     return quicklooks
 
 
+# ✅ NEW: cultivation week picker (simple & understandable)
+def _choose_best_cultivation_week(curr: float, y7: float, y14: float) -> Dict[str, str]:
+    """
+    Human-friendly rule:
+    - We prefer the week with LOWER predicted stress.
+    - If both are low -> "This week" is fine.
+    """
+    # Safety: handle NaNs
+    if not (np.isfinite(curr) and np.isfinite(y7) and np.isfinite(y14)):
+        return {
+            "best_week": "N/A",
+            "confidence": "Low",
+            "reason": "Forecast values are missing or invalid, so cultivation timing cannot be estimated."
+        }
+
+    # classify stress level
+    def level(v):
+        if v < 0.30:
+            return "low"
+        if v < 0.60:
+            return "medium"
+        return "high"
+
+    lcurr, l7, l14 = level(curr), level(y7), level(y14)
+
+    # choose the minimum forecast
+    best_week = "Next 7 days" if y7 <= y14 else "Next 14 days"
+    best_val = min(y7, y14)
+
+    # confidence: clearer separation -> higher confidence
+    diff = abs(y7 - y14)
+    if diff >= 0.08:
+        conf = "High"
+    elif diff >= 0.03:
+        conf = "Medium"
+    else:
+        conf = "Low"
+
+    reason = (
+        f"We compared predicted stress for the next 7 days ({y7:.2f}) "
+        f"and next 14 days ({y14:.2f}). Lower stress is better for cultivation, "
+        f"so the recommendation is: {best_week}."
+    )
+
+    # add easy interpretation
+    if best_val < 0.30:
+        reason += " Conditions look favorable (low stress)."
+    elif best_val < 0.60:
+        reason += " Conditions are moderate — irrigation planning is important."
+    else:
+        reason += " Conditions look difficult (high stress) — consider delaying or preparing mitigation."
+
+    return {"best_week": best_week, "confidence": conf, "reason": reason}
+
+
 # -----------------------------
 # Routes
 # -----------------------------
@@ -275,7 +327,6 @@ def health():
 
 @app.get("/favicon.ico")
 def favicon():
-    # avoid 404 spam; you can replace with a real favicon later
     return Response(content=b"", media_type="image/x-icon")
 
 
@@ -305,16 +356,26 @@ def analyze(req: AnalyzeRequest):
     # 2) Load arrays
     datasets = load_datasets_from_files(files)
 
-    # 3) Forecast + advisory
+    # 3) Forecast + advisory + cultivation
     forecast = _get_forecast_for_panel_from_arrays(bbox, datasets)
     curr = _compute_aoi_current_stress(datasets)
 
     advisory = None
+    best_week = None
+    cult_conf = None
+    cult_reason = None
+
     if isinstance(forecast, dict) and np.isfinite(curr):
         y7 = float(forecast.get("y_7", np.nan))
         y14 = float(forecast.get("y_14", np.nan))
+
         if np.isfinite(y7) and np.isfinite(y14):
             advisory = cultivation_recommendation(float(curr), y7, y14)
+
+            pick = _choose_best_cultivation_week(float(curr), y7, y14)
+            best_week = pick["best_week"]
+            cult_conf = pick["confidence"]
+            cult_reason = pick["reason"]
 
     # 4) quicklooks (PNGs)
     quicklooks = _make_quicklooks(request_id, datasets)
@@ -329,15 +390,18 @@ def analyze(req: AnalyzeRequest):
         current_stress=float(curr) if np.isfinite(curr) else None,
         forecast=forecast if isinstance(forecast, dict) else None,
         advisory=advisory,
+
+        # ✅ send cultivation fields to frontend
+        best_cultivation_week=best_week,
+        cultivation_confidence=cult_conf,
+        cultivation_reason=cult_reason,
     )
 
 
 @app.post("/api/pixel-info", response_model=PixelInfoResponse)
 def pixel_info(req: PixelInfoRequest):
-    # Load arrays from the provided GeoTIFF file paths
     datasets = load_datasets_from_files(req.files)
 
-    # pick a reference raster to validate bounds (NDVI exists in your pipeline)
     ref = datasets.get("NDVI", None)
     if ref is None:
         return JSONResponse({"error": "Missing NDVI raster in files"}, status_code=400)
