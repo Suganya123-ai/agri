@@ -30,7 +30,6 @@ function minusDaysISO(iso, days) {
 async function loadDefaultDates() {
   const end = todayUTCISO();
   const start = minusDaysISO(end, 20);
-
   document.getElementById("startDate").value = start;
   document.getElementById("endDate").value = end;
 }
@@ -44,17 +43,16 @@ function initMap() {
     { maxZoom: 19, attribution: "Esri" }
   ).addTo(map);
 
-  // Labels overlay (place names / roads)
+  // Place names / roads overlay (Esri Reference)
   L.tileLayer(
-    "https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png",
-    { maxZoom: 20, subdomains: "abcd", attribution: "CARTO" }
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 19, attribution: "Esri (Reference)" }
   ).addTo(map);
 
   // Drawing layer
   drawnItems = new L.FeatureGroup();
   map.addLayer(drawnItems);
 
-  // Draw control (Rectangle only)
   const drawControl = new L.Control.Draw({
     draw: {
       polygon: false,
@@ -62,9 +60,7 @@ function initMap() {
       circle: false,
       marker: false,
       circlemarker: false,
-      rectangle: {
-        shapeOptions: { color: "#00b894", weight: 2 }
-      }
+      rectangle: { shapeOptions: { color: "#00b894", weight: 2 } }
     },
     edit: { featureGroup: drawnItems, remove: true }
   });
@@ -94,6 +90,12 @@ function initMap() {
   });
 }
 
+function clearAOI() {
+  drawnItems.clearLayers();
+  lastBBox = null;
+  setStatus("AOI cleared ✅");
+}
+
 function updateResults(resp) {
   lastAnalyzeResponse = resp;
 
@@ -112,26 +114,18 @@ function updateResults(resp) {
   document.getElementById("advisory").textContent =
     "Advisory: " + (resp.advisory || "--");
 
-  // ✅ NEW: cultivation timing fields
-  document.getElementById("bestWeek").textContent =
-    resp.best_cultivation_week || "--";
-
-  document.getElementById("cultConf").textContent =
-    resp.cultivation_confidence || "--";
-
-  document.getElementById("cultReason").textContent =
-    "Reason: " + (resp.cultivation_reason || "--");
-
-  // quicklooks
   const layerSelect = document.getElementById("layerSelect");
   const img = document.getElementById("qlImage");
 
   function showLayer(layerKey) {
-    const url = resp.quicklooks?.[layerKey] || resp.quicklooks?.["True_Color"];
+    const url = resp.quicklooks[layerKey] || resp.quicklooks["Stress_Analysis"] || resp.quicklooks["True_Color"];
     if (url) img.src = url + "?t=" + Date.now();
   }
 
   layerSelect.onchange = () => showLayer(layerSelect.value);
+
+  // ✅ default view = Stress_Analysis
+  layerSelect.value = resp.quicklooks["Stress_Analysis"] ? "Stress_Analysis" : "True_Color";
   showLayer(layerSelect.value);
 }
 
@@ -168,7 +162,6 @@ async function analyze() {
     const data = await res.json();
     updateResults(data);
     setStatus("Done ✅");
-
   } catch (e) {
     console.error(e);
     alert("Analyze failed: " + e.message);
@@ -222,13 +215,11 @@ function bindPixelInspector() {
       document.getElementById("pixNDVI").textContent = data.ndvi == null ? "--" : data.ndvi.toFixed(3);
       document.getElementById("pixNDMI").textContent = data.ndmi == null ? "--" : data.ndmi.toFixed(3);
       document.getElementById("pixNDRE").textContent = data.ndre == null ? "--" : data.ndre.toFixed(3);
-      document.getElementById("pixStress").textContent =
-        data.stress == null ? "--" : `${data.stress.toFixed(3)} (${Math.round(data.stress * 100)}%)`;
+      document.getElementById("pixStress").textContent = data.stress == null ? "--" : `${data.stress.toFixed(3)} (${Math.round(data.stress * 100)}%)`;
 
       document.getElementById("expStatus").textContent = data.explain.status;
       document.getElementById("expWhy").textContent = data.explain.why;
       document.getElementById("expSol").textContent = data.explain.solution;
-
     } catch (e) {
       console.error(e);
       alert("Pixel inspector failed: " + e.message);
@@ -258,7 +249,6 @@ async function loadModels() {
       li.appendChild(a);
       ul.appendChild(li);
     });
-
   } catch (e) {
     ul.innerHTML = "<li>Error loading models</li>";
   }
@@ -269,6 +259,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   await loadDefaultDates();
 
   document.getElementById("analyzeBtn").addEventListener("click", analyze);
+  document.getElementById("clearAoiBtn").addEventListener("click", clearAOI);
   document.getElementById("loadModelsBtn").addEventListener("click", loadModels);
 
   bindPixelInspector();

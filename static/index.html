@@ -44,7 +44,11 @@
         <label>Max cloud cover (%)</label>
         <input id="maxCloud" type="number" min="0" max="100" value="20"/>
 
-        <button id="analyzeBtn">Start Analysis</button>
+        <div class="row" style="margin-top:10px;">
+          <button id="analyzeBtn">Start Analysis</button>
+          <button id="clearAoiBtn" class="secondary">Clear AOI</button>
+        </div>
+
         <div id="status" class="status">Status: Ready</div>
       </div>
 
@@ -60,8 +64,10 @@
         <div class="advisory" id="advisory">Advisory: --</div>
 
         <div class="quicklooks">
-          <div class="ql-title">Quicklooks</div>
+          <div class="ql-title">Quicklooks (click image to inspect pixel)</div>
+
           <select id="layerSelect">
+            <option value="Stress_Analysis">Stress Analysis (recommended)</option>
             <option value="True_Color">True Color</option>
             <option value="Stress_Score">Stress Score</option>
             <option value="NDVI">NDVI</option>
@@ -70,20 +76,9 @@
             <option value="NDWI">NDWI</option>
             <option value="Classification">Classification</option>
           </select>
+
           <img id="qlImage" alt="Quicklook preview" />
         </div>
-      </div>
-
-      <!-- ✅ NEW: CULTIVATION CARD -->
-      <div class="card">
-        <h2>Cultivation Timing</h2>
-
-        <div class="kpi">
-          <div><b>Best week</b>: <span id="bestWeek">--</span></div>
-          <div><b>Confidence</b>: <span id="cultConf">--</span></div>
-        </div>
-
-        <div class="advisory" id="cultReason">Reason: --</div>
       </div>
 
       <div class="card">

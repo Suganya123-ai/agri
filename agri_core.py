@@ -379,8 +379,15 @@ def process_sentinel2_data(bbox, date_range, max_cloud, output_dir=None):
     Stress_Intensity[mask_veg] = combined_stress[mask_veg].astype(np.float32)
 
     rgb_stack = np.dstack((B4, B3, B2))
-    rgb_bright = np.clip(rgb_stack * 2.5, 0, 1)
-    rgb_uint8 = (rgb_bright * 255).astype(np.uint8)
+    rgb = np.dstack((B4, B3, B2))
+    rgb = np.clip(rgb, 0, 1)
+
+    p2 = np.nanpercentile(rgb, 2)
+    p98 = np.nanpercentile(rgb, 98)
+    rgb_stretched = (rgb - p2) / (p98 - p2 + 1e-8)
+    rgb_stretched = np.clip(rgb_stretched, 0, 1)
+
+    rgb_uint8 = (rgb_stretched * 255).astype(np.uint8)
 
     if output_dir is None:
         output_dir = os.path.join(os.path.expanduser("~"), "Downloads", "Agri_AI_Results")

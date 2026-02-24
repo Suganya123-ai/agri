@@ -1,105 +1,257 @@
-:root {
-  --bg: #0f141a;
-  --card: #171f27;
-  --text: #e6edf3;
-  --muted: #9fb0c0;
-  --accent: #00b894;
-  --danger: #ff6b6b;
+/* ===============================
+   GLOBAL
+================================= */
+* {
+  box-sizing: border-box;
 }
 
-* { box-sizing: border-box; }
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
-  background: var(--bg);
-  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
 }
 
 header {
-  padding: 14px 18px;
-  border-bottom: 1px solid #22303d;
+  padding: 20px 30px;
+  background: #0b1220;
+  border-bottom: 1px solid #1e293b;
 }
-.brand { font-weight: 800; font-size: 18px; }
-.sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+.brand {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.sub {
+  font-size: 13px;
+  color: #94a3b8;
+  margin-top: 4px;
+}
 
 main {
-  display: grid;
-  grid-template-columns: 1.3fr 0.7fr;
-  gap: 14px;
-  padding: 14px;
-  height: calc(100vh - 70px);
+  display: flex;
+  height: calc(100vh - 80px);
 }
 
-.left { display: flex; flex-direction: column; gap: 8px; }
+/* ===============================
+   LEFT MAP
+================================= */
+.left {
+  flex: 1.1;
+  display: flex;
+  flex-direction: column;
+}
+
 #map {
   flex: 1;
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid #22303d;
-}
-.hint {
-  color: var(--muted);
-  font-size: 13px;
-  padding: 8px 10px;
 }
 
-.right { overflow: auto; padding-right: 6px; }
+.hint {
+  padding: 10px;
+  font-size: 12px;
+  text-align: center;
+  background: #0b1220;
+  border-top: 1px solid #1e293b;
+  color: #94a3b8;
+}
+
+/* ===============================
+   RIGHT PANEL
+================================= */
+.right {
+  flex: 0.9;
+  overflow-y: auto;
+  padding: 20px;
+  background: #0f172a;
+}
 
 .card {
-  background: var(--card);
-  border: 1px solid #22303d;
-  border-radius: 12px;
-  padding: 12px;
+  background: #111c2f;
+  border: 1px solid #1e293b;
+  border-radius: 14px;
+  padding: 18px;
+  margin-bottom: 18px;
+}
+
+.card h2 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+/* ===============================
+   INPUTS
+================================= */
+label {
+  font-size: 12px;
+  color: #94a3b8;
+  display: block;
+  margin-bottom: 6px;
+}
+
+input,
+select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #e2e8f0;
   margin-bottom: 12px;
 }
 
-.card h2 { margin: 0 0 10px 0; font-size: 16px; }
-label { display: block; margin-top: 10px; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
-
-.row { display: flex; gap: 8px; align-items: center; }
-.sep { color: var(--muted); font-size: 12px; }
-
-input, select {
-  width: 100%;
-  padding: 9px 10px;
-  border-radius: 10px;
-  border: 1px solid #2a3a48;
-  background: #0c1218;
-  color: var(--text);
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
+.sep {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+/* ===============================
+   BUTTONS
+================================= */
 button {
-  width: 100%;
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 10px;
-  background: var(--accent);
-  color: #062a22;
-  font-weight: 800;
+  padding: 9px 14px;
+  border-radius: 8px;
+  border: none;
   cursor: pointer;
+  background: #16a34a;
+  color: white;
+  font-weight: 500;
+  transition: 0.2s ease;
 }
-button:hover { filter: brightness(1.05); }
 
-.status { margin-top: 10px; color: var(--muted); font-size: 13px; }
+button:hover {
+  background: #15803d;
+}
 
-.kpi { display: grid; gap: 6px; color: var(--text); font-size: 14px; }
-.advisory { margin-top: 10px; padding: 10px; border-radius: 10px; background: #0c1218; border: 1px solid #2a3a48; }
+button.secondary {
+  background: #334155;
+}
 
-.quicklooks { margin-top: 10px; }
-.ql-title { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
-#qlImage {
+button.secondary:hover {
+  background: #475569;
+}
+
+/* ===============================
+   STATUS
+================================= */
+.status {
   margin-top: 10px;
-  width: 100%;
-  border-radius: 10px;
-  border: 1px solid #22303d;
-  background: #0c1218;
+  font-size: 13px;
+  color: #38bdf8;
 }
 
-.small { color: var(--muted); font-size: 12px; }
-.pixelbox { margin-top: 10px; display: grid; gap: 6px; font-size: 13px; }
-.explain { margin-top: 10px; padding: 10px; border-radius: 10px; background: #0c1218; border: 1px solid #2a3a48; font-size: 13px; }
-.explain b { color: #cde7ff; }
+/* ===============================
+   KPIs
+================================= */
+.kpi {
+  font-size: 14px;
+  margin-bottom: 10px;
+}
 
-ul { padding-left: 18px; }
-a { color: #7bdcb5; }
+.kpi div {
+  margin-bottom: 4px;
+}
+
+.advisory {
+  margin-top: 10px;
+  padding: 10px;
+  background: #1e293b;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+/* ===============================
+   QUICKLOOK IMAGES (CRITICAL)
+================================= */
+
+.quicklooks {
+  max-width: 720px;      /* prevents over-stretching */
+  margin: 0 auto;
+}
+
+.ql-title {
+  font-size: 13px;
+  margin-bottom: 8px;
+  color: #94a3b8;
+}
+
+#qlImage {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 14px;
+  margin-top: 10px;
+
+  /* VERY IMPORTANT FOR SHARPNESS */
+  image-rendering: auto;
+  object-fit: contain;
+
+  /* Remove browser smoothing artifacts */
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+/* ===============================
+   PIXEL INSPECTOR
+================================= */
+
+.pixelbox {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.explain {
+  margin-top: 12px;
+  padding: 10px;
+  background: #1e293b;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.small {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+/* ===============================
+   MODELS LIST
+================================= */
+#modelsList {
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+#modelsList li {
+  margin-bottom: 5px;
+}
+
+#modelsList a {
+  color: #38bdf8;
+  text-decoration: none;
+}
+
+#modelsList a:hover {
+  text-decoration: underline;
+}
+
+/* ===============================
+   SCROLLBAR (CLEAN)
+================================= */
+.right::-webkit-scrollbar {
+  width: 8px;
+}
+
+.right::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
