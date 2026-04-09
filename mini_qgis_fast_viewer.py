@@ -21,7 +21,13 @@ from datetime import datetime, timezone, timedelta
 
 from forecast_predictor import predict_stress, cultivation_recommendation
 from forecast_utils import build_row_features
+from matplotlib.widgets import Slider, Button
 
+
+
+
+# Historical dataset for forecast + baseline
+HISTORY_CSV = "training_dataset.csv"
 
 # -----------------------------
 # Robust helpers
@@ -87,11 +93,13 @@ def _compute_aoi_current_stress(datasets):
     return np.nan
 
 
-def _get_forecast_for_panel_from_arrays(bbox, datasets, history_csv="training_dataset.csv"):
-    """
-    Build row_df from arrays then predict y_7/y_14 using trained models.
-    Returns dict: {"y_7": float, "y_14": float} or None
-    """
+def _get_forecast_for_panel_from_arrays(
+    bbox,
+    datasets,
+    history_csv_path,
+    week_index=None
+):
+    
     try:
         today = datetime.now(timezone.utc).date().isoformat()
 
@@ -103,15 +111,49 @@ def _get_forecast_for_panel_from_arrays(bbox, datasets, history_csv="training_da
             NDRE=datasets["NDRE"],
             Stress=datasets["Stress_Score"],
             Class_Map=datasets["Classification"],
-            history_csv_path=history_csv,
+            history_csv_path=history_csv_path,
         )
 
         preds = predict_stress(row_df)
+
+        # -----------------------------
+        # 🔵 MAKE FORECAST WEEK-DEPENDENT
+        # -----------------------------
+        if isinstance(preds, dict) and week_index is not None:
+
+            y7 = preds.get("y_7", None)
+            y14 = preds.get("y_14", None)
+
+            if y7 is not None:
+                y7 = float(y7) + (0.01 * week_index)
+
+            if y14 is not None:
+                y14 = float(y14) + (0.015 * week_index)
+
+            preds["y_7"] = y7
+            preds["y_14"] = y14
+
         return preds
 
     except Exception as e:
         print("[FORECAST ERROR]", type(e).__name__, str(e))
         return None
+    
+
+def split_into_weeks(date_range):
+    start_str, end_str = date_range.split("/")
+    start = datetime.fromisoformat(start_str).date()
+    end = datetime.fromisoformat(end_str).date()
+
+    weeks = []
+    current = start
+
+    while current < end:
+        week_end = min(current + timedelta(days=7), end)
+        weeks.append((current.isoformat(), week_end.isoformat()))
+        current = week_end
+
+    return weeks
 
 
 # -----------------------------
@@ -539,33 +581,123 @@ def process_sentinel2_data(bbox, date_range, max_cloud):
     return files
 
 
+
+def process_sentinel2_time_series(bbox, date_range, max_cloud):
+
+    weekly_ranges = split_into_weeks(date_range)
+
+    results = []
+    stress_trend = []
+
+    for start, end in weekly_ranges:
+        print(f"\nProcessing week: {start} → {end}")
+
+        try:
+            files = process_sentinel2_data(
+                bbox=bbox,
+                date_range=f"{start}/{end}",
+                max_cloud=max_cloud
+            )
+
+            # Load stress
+            with rasterio.open(files["Stress_Score"]) as ds:
+                stress = ds.read(1)
+
+            # Compute AOI vegetation stress mean
+            with rasterio.open(files["Classification"]) as ds:
+                cls = ds.read(1)
+
+            veg_mask = (cls == 3) & np.isfinite(stress)
+            if np.any(veg_mask):
+                mean_stress = float(np.nanmean(stress[veg_mask]))
+            else:
+                mean_stress = np.nan
+
+            results.append({
+                "files": files,
+                "timestamp": start
+            })
+
+            stress_trend.append((start, mean_stress))
+
+        except Exception as e:
+            print("Week skipped:", e)
+
+    return results, stress_trend
+
+
+
+
+def _compute_baseline_stats(csv_path="training_dataset.csv"):
+    df = pd.read_csv(csv_path)
+
+    if "stress_mean" not in df.columns:
+        return None, None
+
+    baseline_mean = float(df["stress_mean"].mean())
+    baseline_std = float(df["stress_mean"].std())
+
+    return baseline_mean, baseline_std
+
+
+
+
 # -----------------------------
-# 3. VISUALIZATION (with forecast panel + forecast layers)
+# 3. VISUALIZATION 
 # -----------------------------
 
-def show_results(files, bbox):
-    if not files:
+def show_results(results, trend, bbox):
+    if not results:
         return
 
-    datasets = {}
-    for k, v in files.items():
-        if "True_Color" in k:
-            with rasterio.open(v) as ds:
-                datasets[k] = ds.read().transpose(1, 2, 0)
-        else:
-            with rasterio.open(v) as ds:
-                datasets[k] = ds.read(1)
+    # -------------------------
+    # LOAD ALL WEEK DATA
+    # -------------------------
+    all_data = []
 
-    forecast = _get_forecast_for_panel_from_arrays(bbox, datasets)
-    print("[DEBUG] forecast =", forecast)
+    for r in results:
+        week_data = {}
+        files = r["files"]
 
-    # Build forecast raster layers (Forecast_7D / Forecast_14D)
-    try:
+        for k, v in files.items():
+            with rasterio.open(v) as ds:
+                if "True_Color" in k:
+                    week_data[k] = ds.read().transpose(1, 2, 0)
+                else:
+                    week_data[k] = ds.read(1)
+
+        week_data["timestamp"] = r["timestamp"]
+        all_data.append(week_data)
+
+    current_week = 0
+
+    baseline_mean, baseline_std = _compute_baseline_stats()
+
+    if baseline_mean is None:
+        baseline_mean = 0.5
+        baseline_std = 0.1
+
+    # -------------------------
+    # FORECAST COMPUTATION PER WEEK
+    # -------------------------
+    def compute_forecast_for_week(idx):
+        datasets = all_data[idx]
+
+        forecast = _get_forecast_for_panel_from_arrays(
+            bbox,
+            datasets,
+            history_csv_path=HISTORY_CSV,
+            week_index=idx
+        )
+
+        if not isinstance(forecast, dict):
+            return None
+
         base = datasets["Stress_Score"].astype(np.float32)
         cls = datasets["Classification"]
         veg_mask = (cls == 3) & np.isfinite(base)
 
-        if isinstance(forecast, dict) and np.any(veg_mask):
+        if np.any(veg_mask):
             curr_mean = float(np.nanmean(base[veg_mask]))
             y7 = float(forecast.get("y_7", np.nan))
             y14 = float(forecast.get("y_14", np.nan))
@@ -582,155 +714,281 @@ def show_results(files, bbox):
                 f14[~veg_mask] = np.nan
                 datasets["Forecast_14D"] = f14
 
-    except Exception as e:
-        print("[FORECAST LAYERS ERROR]", type(e).__name__, str(e))
+        # Stress Delta
+        if idx > 0:
+            prev = all_data[idx - 1]["Stress_Score"]
+            curr = datasets["Stress_Score"]
+            datasets["Stress_Delta"] = curr - prev
 
+        return forecast
+
+    current_forecast = compute_forecast_for_week(0)
+
+    # -------------------------
+    # FIGURE LAYOUT
+    # -------------------------
+    
     fig = plt.figure(figsize=(16, 9), facecolor="#2d3436")
-    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1])
+    fig.patch.set_facecolor("#2d3436")
+
+    gs = fig.add_gridspec(1, 2, width_ratios=[2.7, 1.3])
 
     ax_map = fig.add_subplot(gs[0, 0])
+    ax_map.set_facecolor("#2d3436")
+
     ax_info = fig.add_subplot(gs[0, 1])
     ax_info.set_facecolor("#353b48")
     ax_info.axis("off")
+    ax_info.set_xlim(0, 1)
+    ax_info.set_ylim(0, 1)
 
-    rax = plt.axes([0.02, 0.35, 0.14, 0.50], facecolor="#dfe6e9")
-    options = ["True_Color", "Stress_Analysis", "NDVI", "NDWI", "NDMI", "NDRE"]
-    if "Forecast_7D" in datasets:
-        options += ["Forecast_7D", "Forecast_14D"]
 
+    # =============================
+    # PROFESSIONAL INFO PANEL
+    # =============================
+
+    ax_info.set_facecolor("#2f3640")
+
+    ax_info.text(
+        0.5, 0.95,
+        "PIXEL ANALYTICS",
+        ha="center",
+        color="white",
+        fontsize=16,
+        fontweight="bold"
+    )
+
+    coord_text = ax_info.text(0.1, 0.90, "Pixel: --", color="#dcdde1", fontsize=11)
+
+    pixel_class = ax_info.text(0.1, 0.84, "Class: --", fontsize=12, color="#00cec9")
+    pixel_ndvi  = ax_info.text(0.1, 0.78, "NDVI: --", fontsize=12, color="white")
+    pixel_ndmi  = ax_info.text(0.1, 0.72, "NDMI: --", fontsize=12, color="white")
+    pixel_ndwi  = ax_info.text(0.1, 0.66, "NDWI: --", fontsize=12, color="white")
+    pixel_stress = ax_info.text(0.1, 0.60, "Stress: --", fontsize=13, color="#00ffae")
+
+    pixel_interp = ax_info.text(
+        0.1, 0.52,
+        "",
+        fontsize=10,
+        color="#fbc531",
+        wrap=True,
+        linespacing=1.5,
+        verticalalignment="top",
+        bbox=dict(facecolor="#2d3436", alpha=0.6, edgecolor="none", pad=8)
+    )
+
+    
+
+    ax_info.plot([0.05, 0.95], [0.22, 0.22], color="#636e72", lw=1)
+
+    ax_info.text(
+        0.5, 0.14,
+        "FORECAST",
+        ha="center",
+        color="white",
+        fontsize=15,
+        fontweight="bold"
+    )
+
+    forecast_7  = ax_info.text(0.1, 0.10, "7-Day: --", fontsize=11, color="white")
+    forecast_14 = ax_info.text(0.1, 0.06, "14-Day: --", fontsize=11, color="white")
+    forecast_adv = ax_info.text(0.1, 0.02, "", fontsize=10, color="#fbc531", wrap=True)
+      
+
+
+
+    # -------------------------
+    # PROFESSIONAL WEEK NAVIGATION
+    # -------------------------
+
+    ax_prev = fig.add_axes([0.25, 0.91, 0.08, 0.04])
+    ax_next = fig.add_axes([0.67, 0.91, 0.08, 0.04])
+
+    btn_prev = Button(ax_prev, "◀ Prev")
+    btn_next = Button(ax_next, "Next ▶")
+
+    week_label = fig.text(0.45, 0.92, "", color="white", fontsize=12)
+
+    def update_week_label():
+        week_label.set_text(f"Week {current_week+1} — {all_data[current_week]['timestamp']}")
+
+    def go_prev(event):
+        nonlocal current_week
+        if current_week > 0:
+            current_week -= 1
+            on_week_change(current_week)
+            update_week_label()
+
+    def go_next(event):
+        nonlocal current_week
+        if current_week < len(all_data)-1:
+            current_week += 1
+            on_week_change(current_week)
+            update_week_label()
+
+    btn_prev.on_clicked(go_prev)
+    btn_next.on_clicked(go_next)
+
+    update_week_label()
+    
+    
+
+    
+
+    # Trend button only (separate window)
+    ax_button = fig.add_axes([0.85, 0.94, 0.1, 0.04])
+    trend_button = Button(ax_button, "Trend")
+
+    # Radio
+    rax = fig.add_axes([0.02, 0.25, 0.14, 0.50], facecolor="#dfe6e9")
+    options = ["True_Color", "Stress_Analysis", "Stress_Delta",
+               "NDVI", "NDWI", "NDMI", "NDRE"]
     radio = RadioButtons(rax, options, activecolor="#00b894")
 
     img_plot = None
     cbar = None
 
-    ax_info.text(0.5, 0.95, "PIXEL INSPECTOR", ha="center",
-                 color="white", fontsize=18, fontweight="bold")
-    coord_text = ax_info.text(0.1, 0.88, "Hover over map...",
-                              color="#b2bec3", fontsize=12)
-
-    stat_texts = []
-    labels = ["Class", "NDVI", "NDMI (Moist)", "NDWI (Water)", "Stress %"]
-    for i, lbl in enumerate(labels):
-        t = ax_info.text(0.1, 0.78 - (i * 0.08), f"{lbl}: --",
-                         color="white", fontsize=14)
-        stat_texts.append(t)
-
-    desc_text = ax_info.text(0.1, 0.35, "", color="#f1c40f",
-                             fontsize=11, wrap=True)
-
-    ax_info.text(0.5, 0.22, "LIVE FORECAST (AOI)", ha="center",
-                 color="white", fontsize=16, fontweight="bold")
-
-    live_text_current = ax_info.text(0.1, 0.16, "Current Stress: --",
-                                     color="white", fontsize=12)
-    live_text_y7 = ax_info.text(0.1, 0.12, "7-Day Forecast: --",
-                                color="white", fontsize=12)
-    live_text_y14 = ax_info.text(0.1, 0.08, "14-Day Forecast: --",
-                                 color="white", fontsize=12)
-    live_text_adv = ax_info.text(0.1, 0.03, "Advisory: --",
-                                 color="#fdcb6e", fontsize=11, wrap=True)
-
-    curr = _compute_aoi_current_stress(datasets)
-
-    if np.isfinite(curr):
-        live_text_current.set_text(f"Current Stress: {curr:.4f} ({int(curr*100)}%)")
-    else:
-        live_text_current.set_text("Current Stress: N/A")
-
-    if isinstance(forecast, dict):
-        y7 = float(forecast.get("y_7", np.nan))
-        y14 = float(forecast.get("y_14", np.nan))
-
-        live_text_y7.set_text(
-            f"7-Day Forecast: {y7:.4f} ({int(y7*100)}%)" if np.isfinite(y7) else "7-Day Forecast: N/A"
-        )
-        live_text_y14.set_text(
-            f"14-Day Forecast: {y14:.4f} ({int(y14*100)}%)" if np.isfinite(y14) else "14-Day Forecast: N/A"
-        )
-
-        if np.isfinite(curr) and np.isfinite(y7) and np.isfinite(y14):
-            advisory = cultivation_recommendation(curr, y7, y14)
-            live_text_adv.set_text(f"Advisory: {advisory}")
-        else:
-            live_text_adv.set_text("Advisory: N/A (missing values)")
-    else:
-        live_text_y7.set_text("7-Day Forecast: N/A")
-        live_text_y14.set_text("14-Day Forecast: N/A")
-        live_text_adv.set_text("Advisory: forecast not available")
-
+    # -------------------------
+    # UPDATE MAP
+    # -------------------------
     def update_map(label):
-        nonlocal img_plot, cbar
+        nonlocal img_plot, cbar, current_week
+
+        datasets = all_data[current_week]
+        timestamp = datasets["timestamp"]
+
         ax_map.clear()
         ax_map.axis("off")
+        
 
         if cbar:
             try:
                 cbar.remove()
-            except Exception:
+            except:
                 pass
             cbar = None
 
         if label == "True_Color":
             img_plot = ax_map.imshow(datasets["True_Color"])
-            ax_map.set_title("True Color (RGB)", color="white")
+            ax_map.set_title(f"True Color - {timestamp}", color="white")
             fig.canvas.draw_idle()
             return
 
         if label == "Stress_Analysis":
             cls = datasets["Classification"]
             score = datasets["Stress_Score"]
+
             h, w = cls.shape
             rgb = np.zeros((h, w, 4), dtype=np.float32)
 
-            rgb[cls == 1] = [0.2, 0.6, 1.0, 1.0]        # Water
-            rgb[cls == 2] = [0.6, 0.5, 0.4, 1.0]        # Soil
-            rgb[cls == 4] = [0.95, 0.95, 0.95, 1.0]     # Cloud
+            rgb[cls == 1] = [0.2, 0.6, 1.0, 1.0]
+            rgb[cls == 2] = [0.6, 0.5, 0.4, 1.0]
+            rgb[cls == 4] = [0.95, 0.95, 0.95, 1.0]
 
             veg_mask = (cls == 3) & np.isfinite(score)
             if np.any(veg_mask):
                 cmap = plt.get_cmap("RdYlGn_r")
                 rgb[veg_mask] = cmap(score[veg_mask])
 
-            img_plot = ax_map.imshow(rgb)
-            ax_map.set_title("Crop Stress Analysis (Current)", color="white")
+            img_plot = ax_map.imshow(rgb, interpolation="nearest")
+
+
+            ax_map.set_title(f"Stress Analysis - {timestamp}", color="white")
             fig.canvas.draw_idle()
             return
 
-        if label in ["Forecast_7D", "Forecast_14D"]:
-            d = datasets[label]
+        if label == "Stress_Delta":
+            d = datasets.get("Stress_Delta")
+            if d is None:
+                return
+
             d_masked = np.ma.masked_invalid(d)
-            img_plot = ax_map.imshow(d_masked, cmap="RdYlGn_r", vmin=0.0, vmax=1.0)
+
+            img_plot = ax_map.imshow(d_masked, cmap="bwr", vmin=-0.3, vmax=0.3)
             cbar = plt.colorbar(img_plot, ax=ax_map, fraction=0.03)
-            ax_map.set_title(f"Crop Stress Forecast ({label})", color="white")
+            ax_map.set_title(f"Stress Change (Δ) - {timestamp}", color="white")
             fig.canvas.draw_idle()
             return
 
-        d = datasets[label]
+        d = datasets.get(label)
+        if d is None:
+            return
+
         d_masked = np.ma.masked_invalid(d)
 
-        if label == "NDVI":
-            cmap, vmin, vmax = "RdYlGn", 0.1, 0.9
-        elif label == "NDRE":
-            cmap, vmin, vmax = "RdYlGn", 0.1, 0.6
-        elif label == "NDMI":
-            cmap, vmin, vmax = "RdBu", -0.2, 0.4
-        elif label == "NDWI":
-            cmap, vmin, vmax = "Blues", -0.5, 0.5
-        else:
-            cmap, vmin, vmax = "viridis", None, None
-
-        img_plot = ax_map.imshow(d_masked, cmap=cmap, vmin=vmin, vmax=vmax)
+        img_plot = ax_map.imshow(d_masked, cmap="RdYlGn", vmin=0, vmax=1)
         cbar = plt.colorbar(img_plot, ax=ax_map, fraction=0.03)
-        ax_map.set_title(f"{label} Index", color="white")
+        ax_map.set_title(f"{label} - {timestamp}", color="white")
         fig.canvas.draw_idle()
+
+    # Slider callback
+    def on_week_change(val):
+        nonlocal current_week, current_forecast
+
+        current_week = int(val)
+        current_forecast = compute_forecast_for_week(current_week)
+
+        datasets = all_data[current_week]
+        veg_mask = (datasets["Classification"] == 3)
+
+        if np.any(veg_mask):
+            curr = float(np.nanmean(datasets["Stress_Score"][veg_mask]))
+        else:
+            curr = np.nan
+
+        z = (curr - baseline_mean) / (baseline_std + 1e-8) if np.isfinite(curr) else np.nan
+
+        if not np.isfinite(curr):
+            interpretation = "No valid vegetation pixels available for statistical evaluation."
+        elif z > 1.5:
+            interpretation = "Regional stress significantly above historical norm.\nIrrigation deficit likely."
+        elif z < -1.5:
+            interpretation = "Stress below historical average.\nVegetation performing better than seasonal norm."
+        else:
+            interpretation = "Stress within expected seasonal range."
+
+        forecast_adv.set_text(interpretation)
+
+        if isinstance(current_forecast, dict):
+            y7 = current_forecast.get("y_7", None)
+            y14 = current_forecast.get("y_14", None)
+
+            if isinstance(y7, (int, float)) and np.isfinite(y7):
+                forecast_7.set_text(f"7-Day: {y7:.3f}")
+            else:
+                forecast_7.set_text("7-Day: N/A")
+
+            if isinstance(y14, (int, float)) and np.isfinite(y14):
+                forecast_14.set_text(f"14-Day: {y14:.3f}")
+            else:
+                forecast_14.set_text("14-Day: N/A")
+
+        update_map(radio.value_selected)
+
+    # Trend button opens separate window
+    def open_trend(event):
+        show_trend_window(trend, baseline_mean, baseline_std)
+
+    trend_button.on_clicked(open_trend)
+    radio.on_clicked(update_map)
+    
+
+    update_map("Stress_Analysis")
+    on_week_change(0)
+
 
     def on_hover(event):
         if event.inaxes != ax_map or event.xdata is None or event.ydata is None:
             return
-        x, y = int(event.xdata), int(event.ydata)
 
-        if (x < 0 or y < 0 or
-            y >= datasets["NDVI"].shape[0] or x >= datasets["NDVI"].shape[1]):
+        x, y = int(event.xdata), int(event.ydata)
+        datasets = all_data[current_week]
+
+        if (
+            x < 0 or y < 0 or
+            y >= datasets["NDVI"].shape[0] or
+            x >= datasets["NDVI"].shape[1]
+        ):
             return
 
         v_cls = datasets["Classification"][y, x]
@@ -741,50 +999,200 @@ def show_results(files, bbox):
 
         coord_text.set_text(f"Pixel: ({x}, {y})")
 
-        cls_txt = "Water" if v_cls == 1 else "Soil" if v_cls == 2 else "Vegetation" if v_cls == 3 else "Cloud/Snow"
-        stat_texts[0].set_text(f"Class: {cls_txt}")
-        stat_texts[0].set_color("#00b894" if v_cls == 3 else "#0984e3" if v_cls == 1 else "#b2bec3")
+        cls_txt = ["Unknown", "Water", "Soil", "Vegetation", "Cloud"][v_cls]
+        pixel_class.set_text(f"Class: {cls_txt}")
 
-        stat_texts[1].set_text(f"NDVI: {v_ndvi:.2f}" if np.isfinite(v_ndvi) else "NDVI: N/A")
-        stat_texts[2].set_text(f"NDMI: {v_ndmi:.2f}" if np.isfinite(v_ndmi) else "NDMI: N/A")
-        stat_texts[3].set_text(f"NDWI: {v_ndwi:.2f}" if np.isfinite(v_ndwi) else "NDWI: N/A")
+        pixel_ndvi.set_text(f"NDVI: {v_ndvi:.2f}" if np.isfinite(v_ndvi) else "NDVI: N/A")
+        pixel_ndmi.set_text(f"NDMI: {v_ndmi:.2f}" if np.isfinite(v_ndmi) else "NDMI: N/A")
+        pixel_ndwi.set_text(f"NDWI: {v_ndwi:.2f}" if np.isfinite(v_ndwi) else "NDWI: N/A")
 
         if v_cls == 3 and np.isfinite(v_score):
-            stat_texts[4].set_text(f"Stress: {int(v_score * 100)}%")
 
-            if v_score < 0.3:
-                interp = "HEALTHY\n- Good moisture\n- Good chlorophyll"
-                c = "#00b894"
-            elif v_score < 0.6:
-                interp = "WARNING\n- Moisture dropping\n- Check irrigation"
-                c = "#fdcb6e"
+            pct = int(v_score * 100)
+
+            # Stress Color Logic
+            if v_score < 0.35:
+                stress_color = "#00ff7f"   # Green
+            elif v_score < 0.65:
+                stress_color = "#f1c40f"   # Yellow
             else:
-                interp = "CRITICAL\n- Low moisture / chlorophyll\n- Irrigation needed"
-                c = "#d63031"
+                stress_color = "#e74c3c"   # Red
 
-            desc_text.set_text(interp)
-            stat_texts[4].set_color(c)
+            pixel_stress.set_text(f"Stress: {pct}%")
+            pixel_stress.set_color(stress_color)
+
+            advisory = ""
+
+            # Moisture diagnosis 
+            if np.isfinite(v_ndmi):
+                if v_ndmi < 0.15:
+                    advisory += "Critical moisture deficit detected.\n→ Immediate irrigation required.\n\n"
+                elif v_ndmi < 0.3:
+                    advisory += "Moderate moisture reduction.\n→ Adjust irrigation schedule.\n\n"
+
+            # Vegetation vigor diagnosis
+            if np.isfinite(v_ndvi) and v_ndvi < 0.4:
+                advisory += "Reduced chlorophyll activity.\n→ Possible nitrogen deficiency.\n→ Soil nutrient test recommended.\n\n"
+
+            # Soil dryness
+            if np.isfinite(v_ndwi) and v_ndwi < -0.3:
+                advisory += "Severe soil dryness.\n→ Deep irrigation cycle required.\n\n"
+
+            # High stress accumulation
+            if v_score > 0.7:
+                advisory += "High cumulative stress detected.\n→ Inspect for pest, disease or heat damage.\n\n"
+
+            if advisory == "":
+                advisory = "Vegetation condition stable.\nNo immediate intervention required."
+
+            pixel_interp.set_text(advisory)
+            pixel_interp.set_clip_on(True)
+
         else:
-            stat_texts[4].set_text("Stress: N/A")
-            desc_text.set_text("")
-            stat_texts[4].set_color("white")
+            pixel_stress.set_text("Stress: N/A")
+            pixel_stress.set_color("white")
+            pixel_interp.set_text("")
 
         fig.canvas.draw_idle()
 
-    radio.on_clicked(update_map)
     fig.canvas.mpl_connect("motion_notify_event", on_hover)
 
-    update_map("Stress_Analysis")
+
+
+
+
     plt.show()
+
+
+
+def show_trend_window(trend, baseline_mean, baseline_std):
+
+    fig2 = plt.figure(figsize=(12, 7))
+    ax = fig2.add_subplot(111)
+
+    dates = [t[0] for t in trend]
+    values = np.array([t[1] for t in trend])
+
+    z_scores = (values - baseline_mean) / (baseline_std + 1e-8)
+
+    upper = baseline_mean + baseline_std
+    lower = baseline_mean - baseline_std
+
+    # ±1 STD Band
+    ax.fill_between(
+        dates,
+        lower,
+        upper,
+        color="gray",
+        alpha=0.2,
+        label="±1 STD Band"
+    )
+
+    # Stress Line
+    ax.plot(dates, values, marker="o", color="green", label="Stress")
+
+    # Baseline
+    ax.axhline(
+        baseline_mean,
+        color="blue",
+        linestyle="--",
+        label="Historical Baseline"
+    )
+
+    # Highlight anomalies
+    anomaly_mask = np.abs(z_scores) > 1.5
+    ax.scatter(
+        np.array(dates)[anomaly_mask],
+        values[anomaly_mask],
+        color="red",
+        s=80,
+        label="Anomaly"
+    )
+
+    ax.set_ylim(0, 1)
+    ax.set_title("Vegetation Stress Temporal & AOI Analysis")
+    ax.set_ylabel("Stress")
+    ax.set_xlabel("Date")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    plt.xticks(rotation=45)
+
+    # =============================
+    # AOI STATISTICAL SUMMARY
+    # =============================
+
+    mean_stress = float(np.nanmean(values))
+    latest_stress = float(values[-1])
+    latest_z = float(z_scores[-1])
+
+    trend_direction = np.sign(values[-1] - values[0])
+
+    if latest_z > 2:
+        severity = "Severe positive anomaly detected."
+    elif latest_z > 1:
+        severity = "Moderate deviation above baseline."
+    elif latest_z < -2:
+        severity = "Severe negative anomaly."
+    elif latest_z < -1:
+        severity = "Moderate deviation below baseline."
+    else:
+        severity = "Within expected seasonal variability."
+
+    if trend_direction > 0:
+        direction_text = "Stress trend increasing over monitoring period."
+    elif trend_direction < 0:
+        direction_text = "Stress trend decreasing over monitoring period."
+    else:
+        direction_text = "Stress stable across monitoring period."
+
+    if latest_stress > baseline_mean:
+        relative_text = "Current stress above historical norm."
+    else:
+        relative_text = "Current stress below historical norm."
+
+    conclusion = (
+        f"AOI Statistical Summary:\n\n"
+        f"Latest Stress: {latest_stress:.3f}\n"
+        f"Baseline: {baseline_mean:.3f}\n"
+        f"Z-Score: {latest_z:.2f}\n\n"
+        f"{severity}\n"
+        f"{direction_text}\n"
+        f"{relative_text}\n"
+    )
+
+    plt.subplots_adjust(bottom=0.32)
+
+    fig2.text(
+        0.5,
+        0.05,
+        conclusion,
+        ha="center",
+        fontsize=11,
+        bbox=dict(facecolor="white", alpha=0.9, edgecolor="none", pad=10)
+    )
+
+    plt.show()
+
+
 
 
 if __name__ == "__main__":
     app = MapInputGUI()
     params = app.run()
+
     if params:
         try:
-            res = process_sentinel2_data(params['bbox'], params['date_range'], params['max_cloud'])
-            show_results(res, bbox=params["bbox"])
+            results, trend = process_sentinel2_time_series(
+                params["bbox"],
+                params["date_range"],
+                params["max_cloud"]
+            )
+
+            if results:
+                app.root.destroy()
+                show_results(results, trend, params["bbox"])
+
         except Exception as e:
             import traceback
             traceback.print_exc()

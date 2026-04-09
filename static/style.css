@@ -73,6 +73,11 @@ main {
   border-radius: 14px;
   padding: 18px;
   margin-bottom: 18px;
+  transition: 0.3s ease;
+}
+
+.card:hover {
+  border-color: #334155;
 }
 
 .card h2 {
@@ -80,6 +85,14 @@ main {
   margin-bottom: 15px;
   font-size: 16px;
   font-weight: 600;
+}
+
+.card h3 {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #94a3b8;
 }
 
 /* ===============================
@@ -154,27 +167,109 @@ button.secondary:hover {
 ================================= */
 .kpi {
   font-size: 14px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+  line-height: 1.6;
 }
 
 .kpi div {
-  margin-bottom: 4px;
-}
-
-.advisory {
-  margin-top: 10px;
-  padding: 10px;
-  background: #1e293b;
-  border-radius: 8px;
-  font-size: 13px;
+  margin-bottom: 6px;
 }
 
 /* ===============================
-   QUICKLOOK IMAGES (CRITICAL)
+   STRESS BADGE (NEW)
 ================================= */
+.stress-badge {
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
 
+.stress-low {
+  background: rgba(22, 163, 74, 0.2);
+  color: #22c55e;
+}
+
+.stress-medium {
+  background: rgba(234, 179, 8, 0.2);
+  color: #facc15;
+}
+
+.stress-high {
+  background: rgba(220, 38, 38, 0.2);
+  color: #ef4444;
+}
+
+/* ===============================
+   QUALITY SECTION (NEW)
+================================= */
+.quality {
+  margin-top: 16px;
+  padding: 12px;
+  background: #0f1a2b;
+  border-radius: 10px;
+  border: 1px solid #1e293b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.quality div {
+  margin-bottom: 4px;
+}
+
+/* ===============================
+   ADVISORY
+================================= */
+.advisory {
+  margin-top: 14px;
+  padding: 14px;
+  background: linear-gradient(135deg, #1e293b, #0f172a);
+  border-left: 4px solid #16a34a;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.6;
+  transition: 0.3s ease;
+}
+
+/* ===============================
+   CULTIVATION DECISION (NEW)
+================================= */
+.decision {
+  margin-top: 18px;
+  padding: 14px;
+  background: #0f1f1a;
+  border: 1px solid #1e3a2f;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.decision-reason {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.conf-high {
+  color: #22c55e;
+  font-weight: 600;
+}
+
+.conf-medium {
+  color: #facc15;
+  font-weight: 600;
+}
+
+.conf-low {
+  color: #ef4444;
+  font-weight: 600;
+}
+
+/* ===============================
+   QUICKLOOK IMAGES
+================================= */
 .quicklooks {
-  max-width: 720px;      /* prevents over-stretching */
+  max-width: 720px;
   margin: 0 auto;
 }
 
@@ -190,12 +285,8 @@ button.secondary:hover {
   display: block;
   border-radius: 14px;
   margin-top: 10px;
-
-  /* VERY IMPORTANT FOR SHARPNESS */
   image-rendering: auto;
   object-fit: contain;
-
-  /* Remove browser smoothing artifacts */
   -webkit-user-drag: none;
   user-select: none;
 }
@@ -203,7 +294,6 @@ button.secondary:hover {
 /* ===============================
    PIXEL INSPECTOR
 ================================= */
-
 .pixelbox {
   margin-top: 10px;
   font-size: 13px;
@@ -212,10 +302,11 @@ button.secondary:hover {
 
 .explain {
   margin-top: 12px;
-  padding: 10px;
+  padding: 12px;
   background: #1e293b;
   border-radius: 8px;
   font-size: 13px;
+  line-height: 1.5;
 }
 
 .small {
@@ -245,7 +336,7 @@ button.secondary:hover {
 }
 
 /* ===============================
-   SCROLLBAR (CLEAN)
+   SCROLLBAR
 ================================= */
 .right::-webkit-scrollbar {
   width: 8px;
@@ -254,4 +345,36 @@ button.secondary:hover {
 .right::-webkit-scrollbar-thumb {
   background: #334155;
   border-radius: 4px;
+}
+
+
+.timeline{
+display:flex;
+gap:12px;
+overflow-x:auto;
+padding-top:10px;
+}
+
+.timelineCard{
+min-width:160px;
+background:#111c2f;
+border-radius:10px;
+padding:8px;
+border:1px solid #1e293b;
+}
+
+.timelineCard img{
+width:100%;
+border-radius:6px;
+}
+
+.timelineDate{
+font-size:12px;
+margin-top:6px;
+color:#94a3b8;
+}
+
+.timelineStress{
+font-size:13px;
+margin-top:3px;
 }

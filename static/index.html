@@ -13,101 +13,204 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=2" />
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 </head>
 
 <body>
-  <header>
-    <div class="brand">Agri-AI Web</div>
-    <div class="sub">Draw a field • Analyze • Inspect pixels • Get forecast & advice</div>
-  </header>
 
-  <main>
-    <section class="left">
-      <div id="map"></div>
-      <div class="hint">
-        Use the rectangle tool on the map (top-left) to select the area.
-      </div>
-    </section>
+<header>
+  <div class="brand">Agri-AI Web</div>
+  <div class="sub">
+    Precision Field Intelligence • Stress Monitoring • Forecast • Cultivation Timing
+  </div>
+</header>
 
-    <section class="right">
-      <div class="card">
-        <h2>Parameters</h2>
+<main>
 
-        <label>Date range</label>
-        <div class="row">
-          <input id="startDate" type="date"/>
-          <span class="sep">to</span>
-          <input id="endDate" type="date"/>
-        </div>
+  <!-- ================= LEFT MAP ================= -->
+  <section class="left">
+    <div id="map"></div>
+    <div class="hint">
+      Use the rectangle tool on the map (top-left) to select the cultivated field.
+    </div>
+  </section>
 
-        <label>Max cloud cover (%)</label>
-        <input id="maxCloud" type="number" min="0" max="100" value="20"/>
 
-        <div class="row" style="margin-top:10px;">
-          <button id="analyzeBtn">Start Analysis</button>
-          <button id="clearAoiBtn" class="secondary">Clear AOI</button>
-        </div>
+  <!-- ================= RIGHT PANEL ================= -->
+  <section class="right">
 
-        <div id="status" class="status">Status: Ready</div>
+    <!-- PARAMETERS -->
+    <div class="card">
+      <h2>Analysis Parameters</h2>
+
+      <label>Date range</label>
+      <div class="row">
+        <input id="startDate" type="date"/>
+        <span class="sep">to</span>
+        <input id="endDate" type="date"/>
       </div>
 
-      <div class="card">
-        <h2>Results</h2>
+      <label>Max cloud cover (%)</label>
+      <input id="maxCloud" type="number" min="0" max="100" value="20"/>
 
-        <div class="kpi">
-          <div><b>Current Stress</b>: <span id="currStress">--</span></div>
-          <div><b>7-Day</b>: <span id="y7">--</span></div>
-          <div><b>14-Day</b>: <span id="y14">--</span></div>
-        </div>
-
-        <div class="advisory" id="advisory">Advisory: --</div>
-
-        <div class="quicklooks">
-          <div class="ql-title">Quicklooks (click image to inspect pixel)</div>
-
-          <select id="layerSelect">
-            <option value="Stress_Analysis">Stress Analysis (recommended)</option>
-            <option value="True_Color">True Color</option>
-            <option value="Stress_Score">Stress Score</option>
-            <option value="NDVI">NDVI</option>
-            <option value="NDMI">NDMI</option>
-            <option value="NDRE">NDRE</option>
-            <option value="NDWI">NDWI</option>
-            <option value="Classification">Classification</option>
-          </select>
-
-          <img id="qlImage" alt="Quicklook preview" />
-        </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="analyzeBtn">Start Analysis</button>
+        <button id="clearAoiBtn" class="secondary">Clear AOI</button>
       </div>
 
-      <div class="card">
-        <h2>Pixel Inspector</h2>
-        <div class="small">Click on the quicklook image to inspect a pixel.</div>
-        <div class="pixelbox">
-          <div><b>Pixel</b>: <span id="pixXY">--</span></div>
-          <div><b>Class</b>: <span id="pixClass">--</span></div>
-          <div><b>NDVI</b>: <span id="pixNDVI">--</span></div>
-          <div><b>NDMI</b>: <span id="pixNDMI">--</span></div>
-          <div><b>NDRE</b>: <span id="pixNDRE">--</span></div>
-          <div><b>Stress</b>: <span id="pixStress">--</span></div>
-        </div>
+      <div id="status" class="status">Status: Ready</div>
+    </div>
 
-        <div class="explain">
-          <div><b>Status</b>: <span id="expStatus">--</span></div>
-          <div><b>Why</b>: <span id="expWhy">--</span></div>
-          <div><b>Solution</b>: <span id="expSol">--</span></div>
+
+    <!-- ================= AOI SUMMARY ================= -->
+    <div class="card">
+
+      <h2>AOI Intelligence Summary</h2>
+
+      <!-- KPIs -->
+      <div class="kpi">
+        <div>
+          <b>Current Stress</b>:
+          <span id="currStress" class="stress-badge">--</span>
         </div>
+        <div><b>7-Day Forecast</b>: <span id="y7">--</span></div>
+        <div><b>14-Day Forecast</b>: <span id="y14">--</span></div>
       </div>
 
-      <div class="card">
-        <h2>Model Sharing</h2>
-        <button id="loadModelsBtn">Show models</button>
-        <ul id="modelsList"></ul>
+      <!-- Quality -->
+      <div class="quality">
+        <h3>Data Quality</h3>
+        <div><b>Vegetation Coverage</b>: <span id="vegRatio">--</span></div>
+        <div><b>Valid Stress Pixels</b>: <span id="validRatio">--</span></div>
+        <div><b>Cloud Ratio</b>: <span id="cloudRatio">--</span></div>
       </div>
-    </section>
-  </main>
 
-  <script src="/static/app.js"></script>
+      <!-- Advisory -->
+      <div class="advisory" id="advisory">
+        Advisory: --
+      </div>
+
+      <!-- Cultivation Decision -->
+      <div class="decision">
+        <h3>Recommended Cultivation Window</h3>
+        <div><b>Best Timing</b>: <span id="bestWeek">--</span></div>
+        <div><b>Confidence</b>: <span id="confidence">--</span></div>
+        <div class="decision-reason" id="decisionReason">--</div>
+      </div>
+
+    </div>
+
+
+
+    <!-- ================= PIXEL INSPECTOR ================= -->
+    <div class="card">
+
+      <h2>Pixel Inspector</h2>
+
+      <div class="small">
+        Click directly on the quicklook image to inspect vegetation health.
+      </div>
+
+      <div class="pixel-metrics">
+        <div><strong>Coordinates:</strong> <span id="pixXY">--</span></div>
+        <div><strong>Class:</strong> <span id="pixClass">--</span></div>
+        <div><strong>NDVI:</strong> <span id="pixNDVI">--</span></div>
+        <div><strong>NDMI:</strong> <span id="pixNDMI">--</span></div>
+        <div><strong>NDRE:</strong> <span id="pixNDRE">--</span></div>
+        <div><strong>Stress:</strong> <span id="pixStress" class="stress-badge">--</span></div>
+      </div>
+
+      <div class="pixelbox">
+
+        <div class="pixel-status">
+          <strong>Status</strong>
+          <div id="pixelStatus">--</div>
+        </div>
+
+        <div class="pixel-why">
+          <strong>Why</strong>
+          <div id="pixelWhy">--</div>
+        </div>
+
+        <div class="pixel-solution">
+          <strong>Solution</strong>
+          <div id="pixelSolution">--</div>
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <!-- ================= STRESS TREND ================= -->
+    <div class="card">
+
+      <h2>Stress Trend</h2>
+
+      <canvas id="trendChart"></canvas>
+
+    </div>
+
+
+    <!-- ================= QUICKLOOKS ================= -->
+    <div class="card">
+
+      <div class="quicklooks">
+
+        <div class="ql-title">
+          Raster Quicklook (Click image to inspect pixel)
+        </div>
+
+        <select id="layerSelect">
+          <option value="Stress_Analysis">Stress Analysis (recommended)</option>
+          <option value="True_Color">True Color</option>
+          <option value="Stress_Score">Stress Score</option>
+          <option value="NDVI">NDVI</option>
+          <option value="NDMI">NDMI</option>
+          <option value="NDRE">NDRE</option>
+          <option value="NDWI">NDWI</option>
+          <option value="Classification">Classification</option>
+        </select>
+
+        <img id="qlImage" alt="Quicklook preview" />
+
+      </div>
+
+    </div>
+
+
+    <!-- ================= SATELLITE TIMELINE ================= -->
+    <div class="card">
+
+      <h2>Satellite Timeline</h2>
+
+      <div id="timelineContainer" class="timeline"></div>
+
+    </div>
+
+
+    <!-- ================= MODEL SHARING ================= -->
+    <div class="card">
+
+      <h2>Model Sharing</h2>
+
+      <button id="loadModelsBtn">
+        Show available trained models
+      </button>
+
+      <ul id="modelsList"></ul>
+
+    </div>
+
+
+  </section>
+
+</main>
+
+<script src="/static/app.js?v=3"></script>
+
 </body>
 </html>

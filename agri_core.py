@@ -310,7 +310,7 @@ def process_sentinel2_data(bbox, date_range, max_cloud, output_dir=None):
         width = int(np.ceil(window_full.width))
         height = int(np.ceil(window_full.height))
 
-        MAX_PX = 3000
+        MAX_PX = 9000
         scale = 1.0
         if width > MAX_PX or height > MAX_PX:
             scale = MAX_PX / max(width, height)
@@ -325,7 +325,7 @@ def process_sentinel2_data(bbox, date_range, max_cloud, output_dir=None):
 
     final_bounds_crs = inter_b4
 
-    def get_band(key, resampling=Resampling.cubic):
+    def get_band(key, resampling=Resampling.bilinear):
         url = planetary_computer.sign(best_item.assets[key]).href
         with rasterio.open(url) as src:
             inter = _intersect_bounds(
@@ -354,7 +354,7 @@ def process_sentinel2_data(bbox, date_range, max_cloud, output_dir=None):
     B5 = get_band("B05").astype(np.float32) / 10000.0
     B11 = get_band("B11").astype(np.float32) / 10000.0
     B12 = get_band("B12").astype(np.float32) / 10000.0
-    SCL = get_band("SCL", resampling=Resampling.nearest).astype(np.uint8)
+    SCL = get_band("SCL", resampling=Resampling.nearest)
 
     print("Calculating Scientific Indices...")
     np.seterr(divide='ignore', invalid='ignore')
@@ -446,57 +446,191 @@ def process_sentinel2_data(bbox, date_range, max_cloud, output_dir=None):
 
 
 
+# -------------------------------------------------------
+# TIME SERIES ANALYSIS
+# -------------------------------------------------------
+
+def split_into_weeks(date_range):
+
+    start_str, end_str = date_range.split("/")
+    start = datetime.fromisoformat(start_str).date()
+    end = datetime.fromisoformat(end_str).date()
+
+    weeks = []
+    current = start
+
+    while current < end:
+        week_end = min(current + timedelta(days=7), end)
+        weeks.append((current.isoformat(), week_end.isoformat()))
+        current = week_end
+
+    return weeks
+
+
+# -------------------------------------------------------
+# MULTI-WEEK SATELLITE ANALYSIS
+# -------------------------------------------------------
+
+def process_sentinel2_time_series(bbox, date_range, max_cloud):
+
+    weekly_ranges = split_into_weeks(date_range)
+
+    results = []
+    stress_trend = []
+
+    for start, end in weekly_ranges:
+
+        print(f"Processing week: {start} → {end}")
+
+        try:
+
+            files = process_sentinel2_data(
+                bbox=bbox,
+                date_range=f"{start}/{end}",
+                max_cloud=max_cloud
+            )
+
+            with rasterio.open(files["Stress_Score"]) as ds:
+                stress = ds.read(1)
+
+            with rasterio.open(files["Classification"]) as ds:
+                cls = ds.read(1)
+
+            veg_mask = (cls == 3) & np.isfinite(stress)
+
+            if np.any(veg_mask):
+                mean_stress = float(np.nanmean(stress[veg_mask]))
+            else:
+                mean_stress = np.nan
+
+            results.append({
+                "files": files,
+                "timestamp": start
+            })
+
+            stress_trend.append((start, mean_stress))
+
+        except Exception as e:
+            print("Week skipped:", e)
+
+    return results, stress_trend
+
+
+# -------------------------------------------------------
+# AOI TREND ANALYSIS
+# -------------------------------------------------------
+
+def compute_stress_trend(stress_series):
+
+    values = np.array(stress_series)
+
+    mean = float(np.nanmean(values))
+    std = float(np.nanstd(values))
+
+    z = (values[-1] - mean) / (std + 1e-8)
+
+    if z > 1.5:
+        anomaly = "High stress anomaly"
+    elif z < -1.5:
+        anomaly = "Low stress anomaly"
+    else:
+        anomaly = "Normal seasonal variation"
+
+    direction = np.sign(values[-1] - values[0])
+
+    if direction > 0:
+        trend = "Stress increasing"
+    elif direction < 0:
+        trend = "Stress decreasing"
+    else:
+        trend = "Stable"
+
+    return {
+        "mean": mean,
+        "std": std,
+        "zscore": float(z),
+        "trend": trend,
+        "anomaly": anomaly
+    }
+
+
+# -------------------------------------------------------
+# STRESS HOTSPOT DETECTION
+# -------------------------------------------------------
+
+def detect_stress_hotspots(datasets):
+
+    stress = datasets.get("Stress_Score")
+    cls = datasets.get("Classification")
+
+    if stress is None or cls is None:
+        return []
+
+    veg = (cls == 3) & np.isfinite(stress)
+
+    if not np.any(veg):
+        return []
+
+    threshold = np.nanmean(stress[veg]) + np.nanstd(stress[veg])
+
+    ys, xs = np.where((stress > threshold) & veg)
+
+    points = []
+
+    for y, x in zip(ys, xs):
+        points.append({
+            "x": int(x),
+            "y": int(y),
+            "stress": float(stress[y, x])
+        })
+
+    return points
 
 
 
+def compute_pixel_explanation(datasets, x, y):
 
-def compute_pixel_explanation(datasets, x: int, y: int) -> dict:
     cls = int(datasets["Classification"][y, x])
     stress = datasets["Stress_Score"][y, x]
     ndmi = datasets["NDMI"][y, x]
     ndre = datasets["NDRE"][y, x]
-    ndvi = datasets["NDVI"][y, x]
-
-    class_name = {1: "Water", 2: "Soil", 3: "Vegetation", 4: "Cloud/Snow"}.get(cls, "Unknown")
 
     if cls != 3 or not np.isfinite(stress):
+
         return {
-            "class_name": class_name,
-            "stress_percent": "N/A",
-            "reason": "This point is not vegetation (or is masked by clouds).",
-            "solution": "Click on a vegetation area (green field) to get agronomic advice."
+            "status": "Non-vegetation pixel",
+            "why": "This location corresponds to soil, water, or cloud rather than vegetation.",
+            "solution": "Select a vegetated area to analyze crop conditions."
         }
 
-    stress_pct = f"{stress*100:.1f}%"
+    if stress < 0.35:
 
-    # Very simple, human-friendly diagnosis
-    reasons = []
-    actions = []
+        return {
+            "status": "Healthy vegetation",
+            "why": f"Low stress score ({stress:.2f}) and balanced chlorophyll/moisture indicators.",
+            "solution": "Maintain current irrigation and continue monitoring."
+        }
 
-    if np.isfinite(ndmi) and ndmi < 0.05:
-        reasons.append("Low moisture detected")
-        actions.append("Increase irrigation or check irrigation system")
+    if ndmi < 0.1:
 
-    if np.isfinite(ndre) and ndre < 0.20:
-        reasons.append("Low chlorophyll / possible nutrient stress")
-        actions.append("Check fertilization (especially nitrogen) and soil nutrients")
+        return {
+            "status": "Possible water stress",
+            "why": f"Low NDMI ({ndmi:.2f}) indicates reduced leaf moisture.",
+            "solution": "Increase irrigation or inspect soil moisture levels."
+        }
 
-    if not reasons:
-        if stress < 0.35:
-            reasons.append("Vegetation looks healthy")
-            actions.append("Maintain current irrigation and monitoring")
-        elif stress < 0.60:
-            reasons.append("Moderate stress detected")
-            actions.append("Monitor closely, consider light irrigation if no rain")
-        else:
-            reasons.append("High stress detected")
-            actions.append("Urgent: irrigate and check nutrients + pests")
+    if ndre < 0.2:
+
+        return {
+            "status": "Possible nutrient deficiency",
+            "why": f"Low NDRE ({ndre:.2f}) suggests reduced chlorophyll activity.",
+            "solution": "Check fertilization and soil nutrient availability."
+        }
 
     return {
-        "class_name": class_name,
-        "stress_percent": stress_pct,
-        "reason": "; ".join(reasons),
-        "solution": "; ".join(actions),
+        "status": "Moderate vegetation stress",
+        "why": f"Stress score ({stress:.2f}) indicates elevated crop stress.",
+        "solution": "Inspect crops for pests, irrigation issues, or nutrient imbalance."
     }
 
 
@@ -544,3 +678,194 @@ def choose_best_cultivation_simple(curr: float, y7: float, y14: float) -> dict:
         conf = "Low"
 
     return {"best_week": best, "reason": reason, "confidence": conf}
+
+
+
+# -------------------------------------------------------
+# TIME SERIES UTILITIES
+# -------------------------------------------------------
+
+from datetime import timedelta
+
+def split_into_weeks(date_range):
+
+    start_str, end_str = date_range.split("/")
+    start = datetime.fromisoformat(start_str).date()
+    end = datetime.fromisoformat(end_str).date()
+
+    weeks = []
+    current = start
+
+    while current < end:
+        week_end = min(current + timedelta(days=7), end)
+        weeks.append((current.isoformat(), week_end.isoformat()))
+        current = week_end
+
+    return weeks
+
+
+# -------------------------------------------------------
+# MULTI-WEEK SATELLITE ANALYSIS
+# -------------------------------------------------------
+
+def process_sentinel2_time_series(bbox, date_range, max_cloud):
+
+    weekly_ranges = split_into_weeks(date_range)
+
+    results = []
+    stress_trend = []
+
+    for start, end in weekly_ranges:
+
+        try:
+
+            files = process_sentinel2_data(
+                bbox=bbox,
+                date_range=f"{start}/{end}",
+                max_cloud=max_cloud
+            )
+
+            datasets = load_datasets_from_files(files)
+
+            stress = datasets["Stress_Score"]
+            cls = datasets["Classification"]
+
+            veg_mask = (cls == 3) & np.isfinite(stress)
+
+            if np.any(veg_mask):
+                mean_stress = float(np.nanmean(stress[veg_mask]))
+            else:
+                mean_stress = np.nan
+
+            results.append({
+                "files": files,
+                "timestamp": start
+            })
+
+            stress_trend.append((start, mean_stress))
+
+        except Exception as e:
+            print("Week skipped:", e)
+
+    return results, stress_trend
+
+
+# -------------------------------------------------------
+# AOI TREND ANALYSIS
+# -------------------------------------------------------
+
+def compute_stress_trend(stress_series):
+
+    values = np.array(stress_series)
+
+    mean = float(np.nanmean(values))
+    std = float(np.nanstd(values))
+
+    z = (values[-1] - mean) / (std + 1e-8)
+
+    if z > 1.5:
+        anomaly = "High stress anomaly"
+    elif z < -1.5:
+        anomaly = "Low stress anomaly"
+    else:
+        anomaly = "Normal seasonal variation"
+
+    direction = np.sign(values[-1] - values[0])
+
+    if direction > 0:
+        trend = "Stress increasing"
+    elif direction < 0:
+        trend = "Stress decreasing"
+    else:
+        trend = "Stable"
+
+    return {
+        "mean": mean,
+        "std": std,
+        "zscore": float(z),
+        "trend": trend,
+        "anomaly": anomaly
+    }
+
+
+# -------------------------------------------------------
+# STRESS HOTSPOTS
+# -------------------------------------------------------
+
+def detect_stress_hotspots(datasets):
+
+    stress = datasets.get("Stress_Score")
+    cls = datasets.get("Classification")
+
+    if stress is None or cls is None:
+        return []
+
+    veg = (cls == 3) & np.isfinite(stress)
+
+    if not np.any(veg):
+        return []
+
+    threshold = np.nanmean(stress[veg]) + np.nanstd(stress[veg])
+
+    ys, xs = np.where((stress > threshold) & veg)
+
+    hotspots = []
+
+    for y, x in zip(ys, xs):
+
+        hotspots.append({
+            "x": int(x),
+            "y": int(y),
+            "stress": float(stress[y, x])
+        })
+
+    return hotspots
+
+
+
+def compute_field_health(datasets):
+
+    ndvi = datasets["NDVI"]
+    stress = datasets["Stress_Score"]
+    cls = datasets["Classification"]
+
+    veg = (cls == 3) & np.isfinite(ndvi)
+
+    if not np.any(veg):
+        return 0
+
+    mean_ndvi = np.nanmean(ndvi[veg])
+    mean_stress = np.nanmean(stress[veg])
+
+    health = (mean_ndvi * (1 - mean_stress)) * 100
+
+    return float(np.clip(health, 0, 100))
+
+
+def agronomic_advisory(curr, forecast, quality):
+
+    if curr is None:
+        return "No vegetation detected in the selected area."
+
+    y7 = forecast.get("y_7") if forecast else None
+    y14 = forecast.get("y_14") if forecast else None
+
+    veg_ratio = quality.get("veg_ratio",0)
+    cloud = quality.get("cloud_ratio",1)
+
+    if cloud > 0.4:
+        return "Satellite visibility is low due to cloud cover. Results may be uncertain."
+
+    if curr > 0.75:
+        return "Severe crop stress detected. Immediate irrigation and field inspection recommended."
+
+    if curr > 0.55:
+        return "Moderate vegetation stress detected. Monitor soil moisture and irrigation."
+
+    if curr < 0.35:
+        return "Vegetation appears healthy with low stress indicators."
+
+    if y7 and y7 > curr:
+        return "Crop stress is predicted to increase next week. Preventive irrigation may be needed."
+
+    return "Crop conditions appear stable based on current satellite indicators."

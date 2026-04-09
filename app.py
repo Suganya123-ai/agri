@@ -10,13 +10,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-
+import matplotlib.cm as cm
+from PIL import Image
+from agri_timeseries import compute_weekly_series
 from agri_core import (
     process_sentinel2_data,
     load_datasets_from_files,
     _normalize_bbox_wsen,
     _get_forecast_for_panel_from_arrays,
     _compute_aoi_current_stress,
+    _compute_quality_metrics,
+    _choose_best_cultivation_week,
+
+    # NEW ANALYTICS
+    detect_stress_hotspots,
+    compute_stress_trend
 )
 
 from forecast_predictor import cultivation_recommendation
@@ -27,7 +35,7 @@ from forecast_predictor import cultivation_recommendation
 # -----------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")  # quicklook PNGs
+OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
@@ -35,11 +43,11 @@ os.makedirs(OUTPUTS_DIR, exist_ok=True)
 # -----------------------------
 # FastAPI app
 # -----------------------------
-app = FastAPI(title="Agri-AI Web", version="1.0")
+app = FastAPI(title="Agri-AI Web", version="1.1")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,18 +72,24 @@ class AnalyzeResponse(BaseModel):
     bbox: List[float]
     date_range: str
     max_cloud: float
-    selected_outputs: Dict[str, str]          # GeoTIFF paths (server-side)
-    quicklooks: Dict[str, str]               # URLs for browser
-    raster_size: Dict[str, int]              # {"width": W, "height": H}
+    selected_outputs: Dict[str, str]
+    quicklooks: Dict[str, str]
+    raster_size: Dict[str, int]
+
     current_stress: Optional[float] = None
     forecast: Optional[Dict[str, float]] = None
     advisory: Optional[str] = None
+
+    # NEW
+    quality: Optional[Dict[str, float]] = None
+    cultivation_decision: Optional[Dict[str, str]] = None
+    stress_trend: Optional[Dict[str, Any]] = None
+    hotspots: Optional[List[Dict[str, float]]] = None
 
 
 class PixelInfoRequest(BaseModel):
     request_id: str
     files: Dict[str, str]
-    # either x/y OR nx/ny
     x: Optional[int] = None
     y: Optional[int] = None
     nx: Optional[float] = None
@@ -122,144 +136,124 @@ def _class_name(c: int) -> str:
     }.get(int(c), "Unknown")
 
 
-def _explain_pixel(v_cls: int, ndvi, ndmi, ndre, stress) -> PixelExplain:
-    cname = _class_name(v_cls)
-
-    if v_cls != 3:
-        if v_cls == 1:
-            return PixelExplain(
-                status="Not a crop pixel (Water)",
-                why="This pixel is water, not crops.",
-                solution="Draw the rectangle over cultivated fields (vegetation).",
-            )
-        if v_cls == 2:
-            return PixelExplain(
-                status="Not a crop pixel (Soil)",
-                why="This pixel is mostly bare soil (low vegetation cover).",
-                solution="Select an area with crops (greener area / higher NDVI).",
-            )
-        if v_cls == 4:
-            return PixelExplain(
-                status="Not reliable (Cloud/Shadow)",
-                why="Cloud/shadow contamination makes indices unreliable.",
-                solution="Try another date range or increase max cloud slightly.",
-            )
-        return PixelExplain(
-            status="Unknown area",
-            why="This pixel is not confidently vegetation.",
-            solution="Try another area / zoom in / redraw the AOI.",
+def _build_specific_advisory(curr, y7, y14, quality, decision):
+    if curr is None or not np.isfinite(curr):
+        return (
+            "Field condition: unavailable. "
+            "The system could not extract a reliable current stress value for this area."
         )
 
-    if not _isfinite(stress):
-        return PixelExplain(
-            status="Vegetation but missing stress",
-            why="Stress is masked/invalid for this pixel (often cloud mask edges).",
-            solution="Click nearby vegetation pixel or try different dates.",
-        )
+    veg_ratio = float((quality or {}).get("veg_ratio", 0.0))
+    valid_ratio = float((quality or {}).get("valid_stress_ratio", 0.0))
+    cloud_ratio = float((quality or {}).get("cloud_ratio", 1.0))
 
-    s = float(stress)
-    moisture_low = _isfinite(ndmi) and float(ndmi) < 0.05
-    chlor_low = _isfinite(ndre) and float(ndre) < 0.20
+    # 1) Current condition
+    if curr >= 0.75:
+        condition = "Field condition: high stress."
+        meaning = "The crop may be under significant pressure."
+        action = "What to do now: inspect irrigation, check for visible plant damage, and review the most stressed zones as soon as possible."
+    elif curr >= 0.55:
+        condition = "Field condition: moderate stress."
+        meaning = "The crop shows visible pressure, but the situation is not yet extreme."
+        action = "What to do now: inspect the field soon, especially the yellow and red areas, and verify irrigation uniformity."
+    elif curr >= 0.35:
+        condition = "Field condition: mild stress."
+        meaning = "The crop is not in a critical state, but some pressure is present."
+        action = "What to do now: continue monitoring and compare the next image before taking strong action."
+    else:
+        condition = "Field condition: low stress."
+        meaning = "The crop currently appears stable and relatively healthy."
+        action = "What to do now: maintain normal monitoring and no urgent intervention is needed."
 
-    drivers = []
-    if moisture_low:
-        drivers.append("low moisture")
-    if chlor_low:
-        drivers.append("low chlorophyll")
-    if not drivers:
-        drivers.append("heat/irrigation timing/other stress factors")
+    # 2) Short-term trend
+    if np.isfinite(y7) and np.isfinite(y14):
+        if y7 > curr + 0.05 and y14 >= y7:
+            trend = "Outlook: stress is likely to increase over the next two weeks."
+        elif y7 < curr - 0.05 and y14 <= y7:
+            trend = "Outlook: stress is likely to decrease over the next two weeks."
+        elif abs(y7 - curr) <= 0.05 and abs(y14 - curr) <= 0.05:
+            trend = "Outlook: stress is expected to remain relatively stable in the short term."
+        else:
+            trend = "Outlook: slight changes are expected in the coming days, but no major shift is detected."
+    else:
+        trend = "Outlook: short-term forecast is not fully available."
 
-    drivers_text = ", ".join(drivers)
+    # 3) Quality note
+    if cloud_ratio > 0.35:
+        quality_note = "Confidence note: cloud cover is high, so this recommendation should be interpreted cautiously."
+    elif valid_ratio < 0.50:
+        quality_note = "Confidence note: only part of the vegetation has valid stress values, so confidence is limited."
+    elif veg_ratio < 0.20:
+        quality_note = "Confidence note: vegetation coverage inside the selected area is low, so the result may mix crop and non-crop surfaces."
+    else:
+        quality_note = "Confidence note: data quality is acceptable for field interpretation."
 
-    if s < 0.30:
-        return PixelExplain(
-            status="Healthy ✅",
-            why=f"Stress is low. Main signals: {drivers_text}.",
-            solution="Keep current irrigation schedule and monitor regularly.",
-        )
-    elif s < 0.60:
-        return PixelExplain(
-            status="Moderate stress ⚠️",
-            why=f"Stress is increasing. Likely: {drivers_text}.",
-            solution="Check irrigation timing, soil moisture, and inspect plants.",
+    # 4) Best timing
+    if decision and decision.get("best_week"):
+        timing = (
+            f"Best timing: {decision.get('best_week')}, "
+            f"with {decision.get('confidence', 'unknown').lower()} confidence."
         )
     else:
-        return PixelExplain(
-            status="High stress 🛑",
-            why=f"Stress is high. Likely: {drivers_text}.",
-            solution="Prioritize irrigation, inspect for pests/disease, consider protective measures.",
-        )
+        timing = "Best timing: no clear cultivation window could be determined."
+
+    return f"{condition} {meaning} {trend} {action} {quality_note} {timing}"
+
+
+# -----------------------------
+# QUICKLOOK HELPERS 
+# -----------------------------
 
 
 def _save_png(path_png: str, arr: np.ndarray, mode: str):
-    """
-    Save quicklooks at native pixel resolution (NO matplotlib resize).
-    Supports: rgb, class, ndvi/ndmi/ndre/ndwi/stress (scalar), rgba (already colored).
-    """
-    import os
-    import numpy as np
-    from PIL import Image
-    import matplotlib.cm as cm
-
     os.makedirs(os.path.dirname(path_png), exist_ok=True)
-
     a = np.asarray(arr)
 
-    # --------- NEW: direct RGBA saving ----------
-    if mode == "rgba":
-        # Fix common bad shapes like (1,H,W,4) or (H,W,4,1)
-        if a.ndim == 4 and a.shape[0] == 1:
-            a = a[0]                 # (H,W,4)
-        if a.ndim == 4 and a.shape[-1] == 1:
-            a = a[..., 0]            # (H,W,4)
-        if a.ndim != 3 or a.shape[-1] != 4:
-            raise ValueError(f"RGBA image must be (H,W,4). Got {a.shape}")
+    def _upsample_for_display(img: Image.Image) -> Image.Image:
+        min_display_width = 1400
+        if img.width < min_display_width:
+            scale = max(1, int(np.ceil(min_display_width / img.width)))
+            img = img.resize(
+                (img.width * scale, img.height * scale),
+                Image.Resampling.BICUBIC
+            )
+        return img
 
-        if a.dtype != np.uint8:
-            a = np.clip(a, 0, 255).astype(np.uint8)
-
-        Image.fromarray(a, mode="RGBA").save(path_png, format="PNG", optimize=True)
-        return
-
-    # --------- RGB ----------
+    # RGB
     if mode == "rgb":
-        if a.ndim == 4 and a.shape[0] == 1:
-            a = a[0]
-        if a.ndim != 3 or a.shape[-1] != 3:
-            raise ValueError(f"RGB image must be (H,W,3). Got {a.shape}")
-
         if a.dtype != np.uint8:
             a = np.clip(a, 0, 255).astype(np.uint8)
-
-        Image.fromarray(a, mode="RGB").save(path_png, format="PNG", optimize=True)
+        img = Image.fromarray(a, mode="RGB")
+        img = _upsample_for_display(img)
+        img.save(path_png)
         return
 
-    # --------- CLASS ----------
+    # RGBA
+    if mode == "rgba":
+        if a.dtype != np.uint8:
+            a = np.clip(a, 0, 255).astype(np.uint8)
+        img = Image.fromarray(a, mode="RGBA")
+        img = _upsample_for_display(img)
+        img.save(path_png)
+        return
+
+    # CLASS MAP
     if mode == "class":
         a = a.astype(np.uint8)
-        if a.ndim != 2:
-            if a.ndim == 3 and a.shape[0] == 1:
-                a = a[0]
-            else:
-                raise ValueError(f"Class map must be (H,W). Got {a.shape}")
-
         h, w = a.shape
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
-        rgba[a == 1] = [51, 153, 255, 255]    # Water
-        rgba[a == 2] = [153, 128, 102, 255]   # Soil
-        rgba[a == 3] = [51, 204, 102, 255]    # Veg
-        rgba[a == 4] = [245, 245, 245, 255]   # Cloud/Shadow
 
-        Image.fromarray(rgba, mode="RGBA").save(path_png, format="PNG", optimize=True)
+        rgba[a == 1] = [51, 153, 255, 255]
+        rgba[a == 2] = [153, 128, 102, 255]
+        rgba[a == 3] = [51, 204, 102, 255]
+        rgba[a == 4] = [240, 240, 240, 255]
+
+        img = Image.fromarray(rgba, mode="RGBA")
+        img = _upsample_for_display(img)
+        img.save(path_png)
         return
 
-    # --------- SCALAR maps ----------
-    # Must be 2D
-    if a.ndim == 3 and a.shape[0] == 1:
-        a = a[0]
-    if a.ndim != 2:
-        raise ValueError(f"Scalar map must be (H,W). Got {a.shape}")
-
+    # Scalar maps
     a = a.astype(np.float32)
     mask = ~np.isfinite(a)
 
@@ -273,91 +267,59 @@ def _save_png(path_png: str, arr: np.ndarray, mode: str):
         cmap, vmin, vmax = cm.get_cmap("RdYlGn_r"), 0.0, 1.0
     else:
         cmap = cm.get_cmap("viridis")
-        vmin = float(np.nanmin(a)) if np.isfinite(a).any() else 0.0
-        vmax = float(np.nanmax(a)) if np.isfinite(a).any() else 1.0
+        vmin = float(np.nanmin(a))
+        vmax = float(np.nanmax(a))
 
-    den = (vmax - vmin) if vmax != vmin else 1.0
-    x = (a - vmin) / den
+    x = (a - vmin) / (vmax - vmin + 1e-8)
     x = np.clip(x, 0.0, 1.0)
 
     rgba = (cmap(x) * 255).astype(np.uint8)
-    rgba[mask] = [0, 0, 0, 0]  # transparent where NaN
+    rgba[mask] = [0, 0, 0, 0]
 
-    Image.fromarray(rgba, mode="RGBA").save(path_png, format="PNG", optimize=True)
-
+    img = Image.fromarray(rgba, mode="RGBA")
+    img = _upsample_for_display(img)
+    img.save(path_png)
 
 
 def _build_stress_analysis_rgba(datasets: Dict[str, Any]) -> np.ndarray:
-    """
-    Returns a desktop-like composite RGBA image:
-    - Water / Soil / Cloud as fixed colors
-    - Vegetation colored by Stress_Score using RdYlGn_r
-    Output: uint8 array (H, W, 4)
-    """
-    import numpy as np
-    import matplotlib.cm as cm
-
-    cls = np.asarray(datasets["Classification"])
-    score = np.asarray(datasets["Stress_Score"], dtype=np.float32)
-
-    # Make sure cls is 2D
-    if cls.ndim == 3 and cls.shape[0] == 1:
-        cls = cls[0]
-    if cls.ndim != 2:
-        raise ValueError(f"Classification must be (H,W). Got {cls.shape}")
-
-    # Make sure score is 2D
-    if score.ndim == 3 and score.shape[0] == 1:
-        score = score[0]
-    if score.ndim != 2:
-        raise ValueError(f"Stress_Score must be (H,W). Got {score.shape}")
+    cls = datasets["Classification"].astype(np.uint8)
+    score = datasets["Stress_Score"].astype(np.float32)
 
     h, w = cls.shape
     rgba = np.zeros((h, w, 4), dtype=np.uint8)
 
-    # Fixed colors
-    rgba[cls == 1] = [51, 153, 255, 255]     # Water
-    rgba[cls == 2] = [153, 128, 102, 255]    # Soil
-    rgba[cls == 4] = [245, 245, 245, 255]    # Cloud / Shadow
+    rgba[cls == 1] = [51, 153, 255, 255]
+    rgba[cls == 2] = [153, 128, 102, 255]
+    rgba[cls == 4] = [240, 240, 240, 255]
 
-    # Vegetation colored by stress
     veg = (cls == 3) & np.isfinite(score)
+
     if np.any(veg):
         cmap = cm.get_cmap("RdYlGn_r")
-        colors = (cmap(np.clip(score[veg], 0.0, 1.0)) * 255).astype(np.uint8)
-        rgba[veg] = colors  # already RGBA
+        colored = (cmap(np.clip(score, 0.0, 1.0)) * 255).astype(np.uint8)
+        rgba[veg] = colored[veg]
 
     return rgba
 
 
 def _make_quicklooks(request_id: str, datasets: Dict[str, Any]) -> Dict[str, str]:
+
     out_dir = os.path.join(OUTPUTS_DIR, request_id)
     os.makedirs(out_dir, exist_ok=True)
 
     quicklooks = {}
 
-    # True color
     if "True_Color" in datasets:
         p = os.path.join(out_dir, "True_Color.png")
-        _save_png(p, datasets["True_Color"], mode="rgb")
+        _save_png(p, datasets["True_Color"], "rgb")
         quicklooks["True_Color"] = f"/outputs/{request_id}/True_Color.png"
 
-    # Desktop-like composite (Stress_Analysis)
     if "Classification" in datasets and "Stress_Score" in datasets:
-        rgba = _build_stress_analysis_rgba(datasets)  # MUST be (H,W,4) uint8
-
-        # ✅ safety squeeze (fixes (1,H,W,4) etc)
-        rgba = np.asarray(rgba)
-        if rgba.ndim == 4 and rgba.shape[0] == 1:
-            rgba = rgba[0]
-        if rgba.ndim != 3 or rgba.shape[-1] != 4:
-            raise ValueError(f"_build_stress_analysis_rgba returned invalid shape: {rgba.shape}")
-
+        rgba = _build_stress_analysis_rgba(datasets)
         p = os.path.join(out_dir, "Stress_Analysis.png")
-        _save_png(p, rgba, mode="rgba")
+        _save_png(p, rgba, "rgba")
         quicklooks["Stress_Analysis"] = f"/outputs/{request_id}/Stress_Analysis.png"
 
-    # Maps
     for key, mode in [
         ("Stress_Score", "stress"),
         ("NDVI", "ndvi"),
@@ -366,44 +328,15 @@ def _make_quicklooks(request_id: str, datasets: Dict[str, Any]) -> Dict[str, str
         ("NDWI", "ndwi"),
         ("Classification", "class"),
     ]:
+
         if key in datasets:
             p = os.path.join(out_dir, f"{key}.png")
-            _save_png(p, datasets[key], mode=mode)
+            _save_png(p, datasets[key], mode)
             quicklooks[key] = f"/outputs/{request_id}/{key}.png"
 
     return quicklooks
 
 
-
-def _build_stress_analysis_rgba(datasets: Dict[str, Any]) -> np.ndarray:
-    """
-    Desktop-like composite:
-    - Water/Soil/Cloud as fixed colors
-    - Vegetation colored by stress colormap
-    """
-    import matplotlib.cm as cm
-
-    cls = datasets["Classification"].astype(np.uint8)
-    score = datasets["Stress_Score"].astype(np.float32)
-
-    h, w = cls.shape
-    rgba = np.zeros((h, w, 4), dtype=np.uint8)
-
-    # base classes
-    rgba[cls == 1] = [ 51, 153, 255, 255]  # Water
-    rgba[cls == 2] = [153, 128, 102, 255]  # Soil
-    rgba[cls == 4] = [240, 240, 240, 255]  # Cloud/Shadow
-
-    veg_mask = (cls == 3) & np.isfinite(score)
-    if np.any(veg_mask):
-        cmap = cm.get_cmap("RdYlGn_r")  # green->low stress, red->high
-        x = np.clip(score, 0.0, 1.0)
-        colored = (cmap(x) * 255).astype(np.uint8)
-        rgba[veg_mask] = colored[veg_mask]
-
-    # non-veg pixels that are 0 => transparent
-    rgba[(cls == 0)] = [0, 0, 0, 0]
-    return rgba
 
 # -----------------------------
 # Routes
@@ -433,6 +366,7 @@ def default_dates():
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
+
     request_id = uuid.uuid4().hex[:12]
     bbox = _normalize_bbox_wsen(req.bbox)
     date_range = f"{req.start_date}/{req.end_date}"
@@ -440,21 +374,66 @@ def analyze(req: AnalyzeRequest):
     files = process_sentinel2_data(bbox, date_range, req.max_cloud)
     datasets = load_datasets_from_files(files)
 
-    # raster size for frontend mapping sanity
+    # --------------------------------------------------
+    # ADVANCED ANALYTICS
+    # --------------------------------------------------
+
+    # Stress hotspots
+    hotspots = detect_stress_hotspots(datasets)
+
+    # Trend (for now single value placeholder)
+    stress_series = []
+
+    if "Stress_Score" in datasets:
+        arr = datasets["Stress_Score"]
+        stress_series.append(float(np.nanmean(arr[np.isfinite(arr)])))
+
+    trend = compute_stress_trend(stress_series) if stress_series else None
+
     ref = datasets.get("NDVI")
     if ref is None:
         return JSONResponse({"error": "Missing NDVI output"}, status_code=500)
+
     h, w = ref.shape
 
+    # ---- Forecast + Current Stress ----
     forecast = _get_forecast_for_panel_from_arrays(bbox, datasets)
     curr = _compute_aoi_current_stress(datasets)
 
+    # ---- Advisory ----
     advisory = None
-    if isinstance(forecast, dict) and np.isfinite(curr):
+    y7 = np.nan
+    y14 = np.nan
+
+    if isinstance(forecast, dict):
         y7 = float(forecast.get("y_7", np.nan))
         y14 = float(forecast.get("y_14", np.nan))
-        if np.isfinite(y7) and np.isfinite(y14):
-            advisory = cultivation_recommendation(float(curr), y7, y14)
+
+    quality = _compute_quality_metrics(datasets)
+
+    decision = None
+    if isinstance(forecast, dict):
+        decision = _choose_best_cultivation_week(
+            curr,
+            forecast.get("y_7"),
+            forecast.get("y_14"),
+            quality
+        )
+
+    advisory = _build_specific_advisory(curr, y7, y14, quality, decision)
+
+    # ---- NEW: AOI QUALITY ----
+    quality = _compute_quality_metrics(datasets)
+
+    # ---- NEW: CULTIVATION DECISION ----
+    decision = None
+    if isinstance(forecast, dict):
+        decision = _choose_best_cultivation_week(
+            curr,
+            forecast.get("y_7"),
+            forecast.get("y_14"),
+            quality
+        )
 
     quicklooks = _make_quicklooks(request_id, datasets)
 
@@ -466,30 +445,92 @@ def analyze(req: AnalyzeRequest):
         selected_outputs=files,
         quicklooks=quicklooks,
         raster_size={"width": int(w), "height": int(h)},
+
         current_stress=float(curr) if np.isfinite(curr) else None,
         forecast=forecast if isinstance(forecast, dict) else None,
         advisory=advisory,
+
+        quality=quality,
+        cultivation_decision=decision,
+
+        # NEW ANALYTICS
+        stress_trend=trend,
+        hotspots=hotspots
     )
+
+
+@app.post("/api/analyze-timeseries")
+def analyze_timeseries(req: AnalyzeRequest):
+    bbox = _normalize_bbox_wsen(req.bbox)
+    date_range = f"{req.start_date}/{req.end_date}"
+
+    images, series = compute_weekly_series(
+        bbox,
+        date_range,
+        req.max_cloud
+    )
+
+    enriched_images = []
+
+    for i, item in enumerate(images):
+        files = item.get("files", {})
+        date = item.get("date")
+        stress = item.get("stress")
+
+        try:
+            datasets = load_datasets_from_files(files)
+            ts_request_id = f"ts_{uuid.uuid4().hex[:10]}_{i}"
+            quicklooks = _make_quicklooks(ts_request_id, datasets)
+
+            enriched_images.append({
+                "date": date,
+                "stress": stress,
+                "quicklook": (
+                    quicklooks.get("Stress_Analysis")
+                    or quicklooks.get("True_Color")
+                    or quicklooks.get("Stress_Score")
+                )
+            })
+        except Exception as e:
+            print("timeline quicklook skipped:", e)
+            enriched_images.append({
+                "date": date,
+                "stress": stress,
+                "quicklook": None
+            })
+
+    stress_values = [x["stress"] for x in series if x["stress"] is not None]
+    trend = compute_stress_trend(stress_values) if stress_values else None
+
+    return {
+        "images": enriched_images,
+        "stress_series": series,
+        "trend": trend
+    }
 
 
 @app.post("/api/pixel-info", response_model=PixelInfoResponse)
 def pixel_info(req: PixelInfoRequest):
+
     datasets = load_datasets_from_files(req.files)
 
-    ref = datasets.get("NDVI", None)
+    ref = datasets.get("NDVI")
     if ref is None:
         return JSONResponse({"error": "Missing NDVI raster in files"}, status_code=400)
 
     h, w = ref.shape
 
-    # If nx/ny provided, compute pixel safely
     if req.nx is not None and req.ny is not None:
-        nx = float(req.nx)
-        ny = float(req.ny)
-        x = int(nx * (w - 1))
-        y = int(ny * (h - 1))
+        nx = min(max(float(req.nx), 0.0), 1.0)
+        ny = min(max(float(req.ny), 0.0), 1.0)
+        x = int(round(nx * (w - 1)))
+        y = int(round(ny * (h - 1)))
     else:
-        x, y = int(req.x), int(req.y)
+        x = int(req.x) if req.x is not None else 0
+        y = int(req.y) if req.y is not None else 0
+
+    x = max(0, min(x, w - 1))
+    y = max(0, min(y, h - 1))
 
     cls = datasets.get("Classification", None)
     v_cls = int(cls[y, x]) if cls is not None else 0
@@ -504,19 +545,25 @@ def pixel_info(req: PixelInfoRequest):
     v_ndre = float(ndre[y, x]) if ndre is not None and np.isfinite(ndre[y, x]) else None
     v_stress = float(stress[y, x]) if stress is not None and np.isfinite(stress[y, x]) else None
 
-    explain = _explain_pixel(v_cls, v_ndvi, v_ndmi, v_ndre, v_stress)
+    from agri_core import compute_pixel_explanation
+
+    explanation = compute_pixel_explanation(datasets, x, y)
 
     return PixelInfoResponse(
-        x=x,
-        y=y,
-        class_id=v_cls,
-        class_name=_class_name(v_cls),
-        ndvi=v_ndvi,
-        ndmi=v_ndmi,
-        ndre=v_ndre,
-        stress=v_stress,
-        explain=explain,
+    x=x,
+    y=y,
+    class_id=v_cls,
+    class_name=_class_name(v_cls),
+    ndvi=v_ndvi,
+    ndmi=v_ndmi,
+    ndre=v_ndre,
+    stress=v_stress,
+    explain=PixelExplain(
+        status=explanation.get("status", ""),
+        why=explanation.get("why", ""),
+        solution=explanation.get("solution", "")
     )
+)
 
 
 @app.get("/api/models")
