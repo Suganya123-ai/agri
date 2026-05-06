@@ -512,13 +512,35 @@ def analyze_timeseries(req: AnalyzeRequest):
 @app.post("/api/pixel-info", response_model=PixelInfoResponse)
 def pixel_info(req: PixelInfoRequest):
 
-    datasets = load_datasets_from_files(req.files)
+    # Pixel inspector must be fast. Avoid loading full rasters into memory
+    # (can be slow and cause timeouts) — sample a single pixel per layer.
+    import rasterio
+    from rasterio.windows import Window
 
-    ref = datasets.get("NDVI")
-    if ref is None:
+    files = req.files or {}
+
+    # Allow minor key differences (case-insensitive)
+    normalized = {str(k).lower(): v for k, v in files.items()}
+
+    def _get_path(*keys: str) -> str | None:
+        for key in keys:
+            v = files.get(key)
+            if v:
+                return v
+            v = normalized.get(key.lower())
+            if v:
+                return v
+        return None
+
+    ndvi_path = _get_path("NDVI")
+    if not ndvi_path:
         return JSONResponse({"error": "Missing NDVI raster in files"}, status_code=400)
 
-    h, w = ref.shape
+    with rasterio.open(ndvi_path) as ref:
+        h, w = int(ref.height), int(ref.width)
+
+    if w <= 0 or h <= 0:
+        return JSONResponse({"error": "Invalid NDVI raster dimensions"}, status_code=400)
 
     if req.nx is not None and req.ny is not None:
         nx = min(max(float(req.nx), 0.0), 1.0)
@@ -532,38 +554,84 @@ def pixel_info(req: PixelInfoRequest):
     x = max(0, min(x, w - 1))
     y = max(0, min(y, h - 1))
 
-    cls = datasets.get("Classification", None)
-    v_cls = int(cls[y, x]) if cls is not None else 0
+    def _sample_float(path: str | None) -> float | None:
+        if not path:
+            return None
+        try:
+            with rasterio.open(path) as ds:
+                val = ds.read(1, window=Window(x, y, 1, 1))
+                if val.size == 0:
+                    return None
+                v = float(val[0, 0])
+                return v if np.isfinite(v) else None
+        except Exception:
+            return None
 
-    ndvi = datasets.get("NDVI", None)
-    ndmi = datasets.get("NDMI", None)
-    ndre = datasets.get("NDRE", None)
-    stress = datasets.get("Stress_Score", None)
+    def _sample_int(path: str | None) -> int | None:
+        if not path:
+            return None
+        try:
+            with rasterio.open(path) as ds:
+                val = ds.read(1, window=Window(x, y, 1, 1))
+                if val.size == 0:
+                    return None
+                return int(val[0, 0])
+        except Exception:
+            return None
 
-    v_ndvi = float(ndvi[y, x]) if ndvi is not None and np.isfinite(ndvi[y, x]) else None
-    v_ndmi = float(ndmi[y, x]) if ndmi is not None and np.isfinite(ndmi[y, x]) else None
-    v_ndre = float(ndre[y, x]) if ndre is not None and np.isfinite(ndre[y, x]) else None
-    v_stress = float(stress[y, x]) if stress is not None and np.isfinite(stress[y, x]) else None
+    v_cls = _sample_int(_get_path("Classification")) or 0
+    v_ndvi = _sample_float(ndvi_path)
+    v_ndmi = _sample_float(_get_path("NDMI"))
+    v_ndre = _sample_float(_get_path("NDRE"))
+    v_stress = _sample_float(_get_path("Stress_Score"))
 
-    from agri_core import compute_pixel_explanation
-
-    explanation = compute_pixel_explanation(datasets, x, y)
+    # Scalar explanation (mirrors agri_core.compute_pixel_explanation)
+    if v_cls != 3 or v_stress is None:
+        explanation = {
+            "status": "Non-vegetation pixel",
+            "why": "This location corresponds to soil, water, or cloud rather than vegetation.",
+            "solution": "Select a vegetated area to analyze crop conditions.",
+        }
+    elif v_stress < 0.35:
+        explanation = {
+            "status": "Healthy vegetation",
+            "why": f"Low stress score ({v_stress:.2f}) and balanced chlorophyll/moisture indicators.",
+            "solution": "Maintain current irrigation and continue monitoring.",
+        }
+    elif v_ndmi is not None and v_ndmi < 0.1:
+        explanation = {
+            "status": "Possible water stress",
+            "why": f"Low NDMI ({v_ndmi:.2f}) indicates reduced leaf moisture.",
+            "solution": "Increase irrigation or inspect soil moisture levels.",
+        }
+    elif v_ndre is not None and v_ndre < 0.2:
+        explanation = {
+            "status": "Possible nutrient deficiency",
+            "why": f"Low NDRE ({v_ndre:.2f}) suggests reduced chlorophyll activity.",
+            "solution": "Check fertilization and soil nutrient availability.",
+        }
+    else:
+        explanation = {
+            "status": "Moderate vegetation stress",
+            "why": f"Stress score ({v_stress:.2f}) indicates elevated crop stress.",
+            "solution": "Inspect crops for pests, irrigation issues, or nutrient imbalance.",
+        }
 
     return PixelInfoResponse(
-    x=x,
-    y=y,
-    class_id=v_cls,
-    class_name=_class_name(v_cls),
-    ndvi=v_ndvi,
-    ndmi=v_ndmi,
-    ndre=v_ndre,
-    stress=v_stress,
-    explain=PixelExplain(
-        status=explanation.get("status", ""),
-        why=explanation.get("why", ""),
-        solution=explanation.get("solution", "")
+        x=x,
+        y=y,
+        class_id=int(v_cls),
+        class_name=_class_name(int(v_cls)),
+        ndvi=v_ndvi,
+        ndmi=v_ndmi,
+        ndre=v_ndre,
+        stress=v_stress,
+        explain=PixelExplain(
+            status=explanation.get("status", ""),
+            why=explanation.get("why", ""),
+            solution=explanation.get("solution", ""),
+        ),
     )
-)
 
 
 @app.get("/api/models")

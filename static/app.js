@@ -85,13 +85,11 @@ function initMap() {
   map = L.map("map").setView(BANGALORE, 11);
 
   L.tileLayer(
-    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    { maxZoom: 19 }
-  ).addTo(map);
-
-  L.tileLayer(
-    "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
-    { maxZoom: 19 }
+    "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors",
+    }
   ).addTo(map);
 
   drawnItems = new L.FeatureGroup();
@@ -287,8 +285,22 @@ function bindPixelInspector() {
     }
 
     const rect = img.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      alert("Quicklook not ready yet — try again in a second.");
+      return;
+    }
     const nx = (ev.clientX - rect.left) / rect.width;
     const ny = (ev.clientY - rect.top) / rect.height;
+
+    // Pixel inspector only needs a small subset of rasters.
+    // Sending fewer files reduces payload size and avoids slow raster loads.
+    const allFiles = lastAnalyzeResponse.selected_outputs || {};
+    const neededKeys = ["NDVI", "NDMI", "NDRE", "Stress_Score", "Classification"];
+    const files = {};
+    neededKeys.forEach((k) => {
+      if (allFiles[k]) files[k] = allFiles[k];
+    });
+    const filesToSend = files.NDVI ? files : allFiles;
 
     try {
       const res = await fetch("/api/pixel-info", {
@@ -298,7 +310,7 @@ function bindPixelInspector() {
           request_id: lastAnalyzeResponse.request_id,
           nx,
           ny,
-          files: lastAnalyzeResponse.selected_outputs
+          files: filesToSend
         })
       });
 
